@@ -1,3 +1,4 @@
+import { lookup as dnsLookup } from 'node:dns/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import type { Db } from '../../core/db.ts'
