@@ -125,11 +125,13 @@ async function transcribe(items: Item[], replay = false) {
     const user = i.type === 'user_message' || (i.type === 'message' && i.createdBy === 'user')
     const assistant = i.type === 'assistant_message' || (i.type === 'message' && i.createdBy === 'agent')
     if (replay && user) {
-      const marker = /^\[DevDash workflow ([a-f0-9-]{36})\]\n/.exec(text)
-      if (marker && requestMatches(i, marker[1]!)) {
-        const end = `\n[/DevDash workflow ${marker[1]}]\n\n`
-        const idx = text.indexOf(end)
-        if (idx !== -1) text = text.slice(idx + end.length)
+      for (const tag of ['DevDash rules', 'DevDash workflow']) {
+        const marker = new RegExp(`^\\[${tag} ([a-f0-9-]{36})\\]\\n`).exec(text)
+        if (marker && requestMatches(i, marker[1]!)) {
+          const end = `\n[/${tag} ${marker[1]}]\n\n`
+          const idx = text.indexOf(end)
+          if (idx !== -1) text = text.slice(idx + end.length)
+        }
       }
     }
     const previous = sentText.get(i.itemId) ?? ''
@@ -266,8 +268,14 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
       const afterPosition = lastPosition
       const requestId = randomUUID()
       const text = prompt.map((b) => b.text ?? '').join('\n')
-      const message = typeof p.workflowContext === 'string'
-        ? `[DevDash workflow ${requestId}]\n${p.workflowContext}\n[/DevDash workflow ${requestId}]\n\n${text}` : text
+      const blocks: string[] = []
+      if (typeof p.rulesContext === 'string' && p.rulesContext.trim() && before.items.length === 0) {
+        blocks.push(`[DevDash rules ${requestId}]\n${p.rulesContext.trim()}\n[/DevDash rules ${requestId}]`)
+      }
+      if (typeof p.workflowContext === 'string' && p.workflowContext.trim()) {
+        blocks.push(`[DevDash workflow ${requestId}]\n${p.workflowContext}\n[/DevDash workflow ${requestId}]`)
+      }
+      const message = blocks.length ? `${blocks.join('\n\n')}\n\n${text}` : text
       const baselineRuns = new Set(before.recentRuns.map((r) => r.runId))
       unresolvedSend = true
       let result: { runId: string; delivery?: string }

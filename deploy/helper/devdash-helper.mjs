@@ -614,71 +614,31 @@ const commands = {
     if (!entry || !(entry.uid >= 1000 && entry.uid < 60000)) throw new Refused('not a member account')
     if (!DRY && !groupsOf(u).includes(MEMBERS_GROUP)) throw new Refused('not a DevDash member')
 
+    const port = a.port === undefined || a.port === null ? null : Number(a.port)
+    if (port !== null && (!Number.isInteger(port) || port < 1024 || port > 65535)) {
+      throw new Refused('invalid port')
+    }
+
     const t3Bin = '/opt/devdash/t3code/current/t3'
     if (!DRY && !existsSync(t3Bin)) {
       throw new Error('T3 Code is not installed on this server (/opt/devdash/t3code/current/t3).')
     }
 
+    // Root ONLY installs the systemd unit and enables/starts it.
+    // The member's own unprivileged agent creates ~/.local/share/devdash-t3 and ~/.config/devdash/t3-service.env.
     const unitDest = '/etc/systemd/system/devdash-t3@.service'
     const unitSrc = '/opt/devdash/current/deploy/systemd/devdash-t3@.service'
-    if (DRY || (!existsSync(unitDest) && existsSync(unitSrc))) {
+    if (DRY || (existsSync(unitSrc) && (!existsSync(unitDest) || readFileSync(unitDest, 'utf8') !== readFileSync(unitSrc, 'utf8')))) {
       run('install', ['-m', '644', unitSrc, unitDest])
       run('systemctl', ['daemon-reload'])
     }
 
-    const home = entry.home || `/home/${u}`
-    if (!DRY) {
-      const hst = lstatSync(home)
-      if (!hst.isDirectory() || hst.isSymbolicLink() || hst.uid !== entry.uid) {
-        throw new Refused(`unsafe home directory: ${home}`)
-      }
-    }
-    const baseDir = `${home}/.local/share/devdash-t3`
-    const cfgDir = `${home}/.config/devdash`
-    const envFile = `${cfgDir}/t3-service.env`
-
-    for (const [dir, mode] of [
-      [`${home}/.local`, '700'],
-      [`${home}/.local/share`, '700'],
-      [baseDir, '700'],
-      [`${home}/.config`, '700'],
-      [cfgDir, '700'],
-    ]) {
-      if (!DRY && existsSync(dir)) {
-        const st = lstatSync(dir)
-        if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== entry.uid) {
-          throw new Refused(`unsafe directory: ${dir}`)
-        }
-      } else {
-        run('install', ['-d', '-m', mode, '-o', u, '-g', u, dir])
-      }
-    }
-    run('chmod', ['700', baseDir, cfgDir])
-
-    let port = null
-    if (!DRY && existsSync(envFile)) {
-      const st = lstatSync(envFile)
-      if (!st.isFile() || st.isSymbolicLink() || st.uid !== entry.uid) {
-        throw new Refused('unsafe t3-service.env')
-      }
-      const m = readFileSync(envFile, 'utf8').match(/^\s*DEVDASH_T3_PORT\s*=\s*(\d{4,5})\s*$/m)
-      if (m) {
-        const n = Number(m[1])
-        if (Number.isInteger(n) && n >= 1024 && n <= 65535) port = n
-      }
-    }
-
-    if (!port) {
-      port = DRY ? 3781 : await pickT3Port()
-      runInput('install', ['-m', '600', '-o', u, '-g', u, '/dev/stdin', envFile], `DEVDASH_T3_PORT=${port}\n`)
-    }
-
     run('systemctl', ['enable', '--now', `devdash-t3@${u}`])
-    if (!DRY) {
+    if (!DRY && port !== null) {
       const ready = await waitPort(port, 8000)
       if (!ready) throw new Error(`devdash-t3@${u} started, but 127.0.0.1:${port} did not become ready in time.`)
     }
-    return { port, baseDir, url: `http://127.0.0.1:${port}/mcp` }
+    return { enabled: true, ...(port !== null ? { port, url: `http://127.0.0.1:${port}/mcp` } : {}) }
   },
 
   'tailnet-unisolate'(a) {
@@ -752,24 +712,6 @@ async function waitPort(port, timeoutMs) {
     await new Promise((r) => setTimeout(r, 250))
   }
   return false
-}
-
-async function pickT3Port() {
-  const claimed = new Set()
-  try {
-    for (const name of readdirSync('/home')) {
-      try {
-        const raw = readFileSync(`/home/${name}/.config/devdash/t3-service.env`, 'utf8')
-        const m = raw.match(/^\s*DEVDASH_T3_PORT\s*=\s*(\d{4,5})\s*$/m)
-        if (m) claimed.add(Number(m[1]))
-      } catch { /* ignore */ }
-    }
-  } catch { /* ignore */ }
-  for (let p = 3781; p <= 3899; p++) {
-    if (claimed.has(p)) continue
-    if (!(await portOpen(p))) return p
-  }
-  throw new Error('No free local port available for devdash-t3 (3781-3899).')
 }
 
 async function main() {

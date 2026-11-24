@@ -142,6 +142,7 @@ const ops: Record<string, (r: Req) => Promise<unknown> | unknown> = {
   'claude.commands': (r) => (harness.isAcp(r.harness) ? harness.commandsAndModels(r.harness, str(r.profile, 'profile'), typeof r.model === 'string' ? r.model : undefined, r.supervisor === true) : claude.commandsAndModels(str(r.profile, 'profile'))),
   'claude.title': (r) => (acp(r) ? harness : claude).title(launchOf(r)),
   'claude.rename': async (r) => (await (acp(r) ? harness : claude).rename(launchOf(r), str(r.title, 'title')), { ok: true }),
+  't3.prepare': async () => harness.prepareT3(),
   't3.connect': async (r) => harness.connectT3({
     ...(typeof r.url === 'string' && r.url ? { url: r.url } : {}),
     ...(typeof r.baseDir === 'string' && r.baseDir ? { baseDir: r.baseDir } : {}),
