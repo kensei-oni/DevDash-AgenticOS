@@ -62,7 +62,7 @@ export function ServerPage() {
               </> : <Calm>No backup yet. One runs every night at 03:30 UTC.</Calm>}
             </Block>
 
-            <Block title="Software" action={d.canAct && <span className="flex flex-wrap justify-end gap-2"><UpdateButton sdk={d.software.claudeSdk} agent="claude" /><UpdateButton sdk={d.software.opencode} agent="opencode" /><UpdateButton sdk={d.software.browser} agent="browser" /></span>}>
+            <Block title="Software" action={d.canAct && <span className="flex flex-wrap justify-end gap-2"><UpdateButton sdk={d.software.claudeSdk} agent="claude" /><UpdateButton sdk={d.software.opencode} agent="opencode" /><UpdateButton sdk={d.software.t3code} agent="t3" /><UpdateButton sdk={d.software.browser} agent="browser" /></span>}>
               <Panel>
                 <Line label="DevDash" value={<><span className="tabular-nums">{d.software.devdash}</span>{d.software.release && <span className="text-muted-foreground">, <span className="font-mono text-[13px]">{d.software.release.id.slice(0, 7)}</span></span>}</>} />
                 {d.software.release && <Line label="Deployed" value={relativeTime(d.software.release.since)} />}
@@ -70,11 +70,13 @@ export function ServerPage() {
                 <Line label="Updates" value={<UpdateState sdk={d.software.claudeSdk} />} />
                 <Line label="OpenCode" value={d.software.opencode.version ? <span className="tabular-nums">{d.software.opencode.version}</span> : <UpdateState sdk={d.software.opencode} agent="opencode" />} />
                 {d.software.opencode.installed && <Line label="Updates" value={<UpdateState sdk={d.software.opencode} agent="opencode" />} />}
+                <Line label="T3 Code" value={d.software.t3code.version ? <span className="tabular-nums">{d.software.t3code.version}</span> : <UpdateState sdk={d.software.t3code} agent="t3" />} />
+                {d.software.t3code.installed && <Line label="Updates" value={<UpdateState sdk={d.software.t3code} agent="t3" />} />}
                 <Line label="Team browser" value={d.software.browser.installed ? <span className="tabular-nums">neko {d.software.browser.installed}</span> : <UpdateState sdk={d.software.browser} agent="browser" />} />
                 {d.software.browser.installed && <Line label="Updates" value={<UpdateState sdk={d.software.browser} agent="browser" />} />}
-                {d.canAct && (d.software.opencode.failed || d.software.claudeSdk.failed || d.software.browser.failed) && (
+                {d.canAct && (d.software.opencode.failed || d.software.claudeSdk.failed || d.software.t3code.failed || d.software.browser.failed) && (
                   <p className="px-3 pb-2 text-xs text-pretty text-muted-foreground">
-                    Why it failed is in its log on the server: <code className="font-mono">journalctl -u devdash-{d.software.browser.failed ? 'browser' : d.software.opencode.failed ? 'opencode' : 'claude'}-update</code>. Install again when it's fixed.
+                    Why it failed is in its log on the server: <code className="font-mono">journalctl -u devdash-{d.software.browser.failed ? 'browser' : d.software.t3code.failed ? 't3' : d.software.opencode.failed ? 'opencode' : 'claude'}-update</code>. Install again when it's fixed.
                   </p>
                 )}
                 <Line label="Node.js" value={<span className="tabular-nums">{d.software.node}</span>} />
@@ -186,8 +188,8 @@ const newer = (a: string, b: string) => {
 
 // Claude Code comes from the Agent SDK package (deploy/claude-update.sh), OpenCode from its own (deploy/opencode-update.sh),
 // the team browser from neko's image (the root helper's browser-update); admins install and update them for everyone here.
-type Updatable = 'claude' | 'opencode' | 'browser'
-const NAMES: Record<Updatable, string> = { claude: 'Claude Code', opencode: 'OpenCode', browser: 'the team browser' }
+type Updatable = 'claude' | 'opencode' | 't3' | 'browser'
+const NAMES: Record<Updatable, string> = { claude: 'Claude Code', opencode: 'OpenCode', t3: 'T3 Code', browser: 'the team browser' }
 type Sdk = { installed: string | null; latest: string | null; updating: boolean; failed?: boolean }
 const updateAvailable = (sdk: Sdk) => !!sdk.latest && !!sdk.installed && newer(sdk.latest, sdk.installed)
 
@@ -209,7 +211,7 @@ function UpdateButton({ sdk, agent }: { sdk: Sdk; agent: Updatable }) {
     onSuccess: () => {
       toast.success(agent === 'browser'
         ? `${install ? 'Downloading' : 'Updating'} the team browser. It takes a few minutes; if it's open, it switches over the next time it starts.`
-        : `${install ? 'Installing' : 'Updating'} ${name}. It takes a minute or two; running sessions keep their version until they restart.`)
+        : agent === 't3' ? `${install ? 'Installing' : 'Updating'} T3 Code. It takes a minute or two and restarts active member T3 services automatically.` : `${install ? 'Installing' : 'Updating'} ${name}. It takes a minute or two; running sessions keep their version until they restart.`)
       void qc.invalidateQueries({ queryKey: ['status'] })
     },
     onError: (e) => toast.error(e.message),

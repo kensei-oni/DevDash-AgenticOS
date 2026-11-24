@@ -242,3 +242,13 @@ test('t3-ensure: validates member account, installs/enables systemd unit only, a
   assert.match(call({ cmd: 't3-ensure', args: { username: 'alice' } }, { DEVDASH_HELPER_FAKE_UID: '33' }).error!, /refused: not a member account/)
   assert.match(call({ cmd: 't3-ensure', args: { username: 'alice', port: 80 } }, { DEVDASH_HELPER_FAKE_UID: '1000' }).error!, /refused: invalid port/)
 })
+
+test('t3-update starts its own update unit without waiting; its status is read-only', () => {
+  const r = call({ cmd: 't3-update' })
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.planned, ['systemctl start --no-block devdash-t3-update.service'])
+  const s = call({ cmd: 't3-update-status' }) as unknown as { ok: boolean; state: string; planned: string[] }
+  assert.equal(s.ok, true)
+  assert.equal(s.state, 'inactive')
+  assert.deepEqual(s.planned, [])
+})

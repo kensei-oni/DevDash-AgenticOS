@@ -1,0 +1,9 @@
+[Unit]
+Description=DevDash: update T3 Code to the latest version
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+ExecStart=/usr/local/libexec/devdash-t3-update.sh
+Nice=10

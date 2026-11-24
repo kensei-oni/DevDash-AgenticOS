@@ -694,6 +694,16 @@ const commands = {
     return unitState('devdash-opencode-update.service')
   },
 
+  /** Installs or updates T3 Code for everyone to the latest release (deploy/t3-update.sh), in the background. */
+  't3-update'() {
+    run('systemctl', ['start', '--no-block', 'devdash-t3-update.service'])
+    return {}
+  },
+
+  't3-update-status'() {
+    return unitState('devdash-t3-update.service')
+  },
+
   /**
    * Deploys a commit of DevDash's GitHub repository (deploy/self-deploy.sh), in the background, after an admin
    * approved it. The script checks the commit is on the repository's main branch. One deploy at a time.

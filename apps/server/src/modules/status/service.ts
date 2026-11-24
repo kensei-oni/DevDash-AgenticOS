@@ -133,6 +133,12 @@ export function statusService({ db, agents, services, browser, runDir, dataDir, 
   })
   // OpenCode starts a new process per session, so a new version applies to the next session by itself.
   const opencode = agentInstall({ name: 'opencode', read: ran('/opt/devdash/opencode/current/bin/opencode'), installed: linked('opencode'), newest: npmLatest('@opencode/cli') })
+  const githubLatest = (repo: string) => () => fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+    headers: { 'user-agent': 'devdash' },
+    signal: AbortSignal.timeout(5000),
+  }).then((r) => r.json() as Promise<{ tag_name?: string }>).then((j) => j.tag_name?.replace(/^v/, '') || null)
+  // T3 Code comes from pingdotgg/t3code GitHub releases; deploy/t3-update.sh swaps /opt/devdash/t3code/current and restarts active member services.
+  const t3code = agentInstall({ name: 't3', read: ran('/opt/devdash/t3code/current/t3'), installed: linked('t3code'), newest: githubLatest('pingdotgg/t3code') })
   // The team browser: neko's image. An update downloads its newest release of the major version the root helper speaks
   // (its settings and API), which the browser runs from its next start.
   let neko: { image: string; major: number } | null = null
@@ -164,6 +170,7 @@ export function statusService({ db, agents, services, browser, runDir, dataDir, 
           devdash: version, release: release(), claude: await claude.version(), node: process.versions.node,
           claudeSdk: await claude.state(),
           opencode: { version: await opencode.version(), ...(await opencode.state()) },
+          t3code: { version: await t3code.version(), ...(await t3code.state()) },
           browser: await teamBrowser.state(),
         },
         backup: backup ? JSON.parse(backup) as { at: number; ok: boolean; snapshot: string; bytes: number; offsite: boolean; note: string } : null,
@@ -178,6 +185,8 @@ export function statusService({ db, agents, services, browser, runDir, dataDir, 
     updateClaude: () => claude.update(),
     /** Admins: install OpenCode, or update it to the latest version, for everyone. */
     updateOpencode: () => opencode.update(),
+    /** Admins: install T3 Code, or update it to the latest release, for everyone. */
+    updateT3: () => t3code.update(),
     /** Admins: the team browser to the newest release of its version line. */
     updateBrowser: () => teamBrowser.update(),
 
