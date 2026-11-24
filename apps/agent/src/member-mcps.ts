@@ -1,4 +1,4 @@
-// Provider configuration is read and updated by the member's agent. Return only safe summaries.
+// Provider configuration is read and updated by the member's agent. Return only safe summaries from inventory().
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
@@ -13,16 +13,145 @@ import { readConfig } from './t3-client.ts'
 
 type ObjectMap = Record<string, unknown>
 const object = (v: unknown): v is ObjectMap => !!v && typeof v === 'object' && !Array.isArray(v)
-type Format = 'opencode' | 'codex' | 'claude' | 'gemini' | 'cursor' | 'antigravity'
-type Source = { id: string; format: Format; file: string; label: string; path?: string[] }
-export type McpSource = { id: string; label: string; revision: string; canToggle?: boolean; error?: string }
+export type McpFormat = 'opencode' | 'codex' | 'claude' | 'gemini' | 'cursor' | 'antigravity'
+type Source = { id: string; format: McpFormat; file: string; label: string; path?: string[] }
+export type McpSource = { id: string; label: string; file: string; format: McpFormat; revision: string; canToggle?: boolean; error?: string }
 export type McpEntry = { source: string; name: string; transport: string; host: string | null; enabled: boolean }
 export type McpInventory = { sources: McpSource[]; entries: McpEntry[] }
+
+export type McpEntryConfig = {
+  source: string
+  label: string
+  name: string
+  file: string
+  format: McpFormat
+  revision: string
+  transport: string
+  enabled: boolean
+  url: string | null
+  command: string[] | null
+  cwd: string | null
+  envKeys: string[]
+  headerKeys: string[]
+  hasSecrets: boolean
+  revealed: boolean
+  configText: string
+  configLang: 'json' | 'toml'
+}
+
+export type McpSourceConfig = {
+  source: string
+  label: string
+  file: string
+  format: McpFormat
+  revision: string
+  count: number
+  hasSecrets: boolean
+  revealed: boolean
+  configText: string
+  configLang: 'json' | 'toml'
+}
+
+const SECRET_KEY_RE = /token|secret|password|passwd|api[_-]?key|auth|credential|bearer|private[_-]?key|signature|sig$/i
+const SECRET_FLAG_RE = /^--?(?:api[-_]?key|token|auth|secret|password|bearer|header|H)$/i
+const MASK = '••••••••'
+
+function displayPath(file: string): string {
+  const home = homedir()
+  return file === home ? '~' : file.startsWith(home + '/') ? '~/' + file.slice(home.length + 1) : file
+}
+
+function redactUrl(raw: string): { value: string; redacted: boolean } {
+  try {
+    const u = new URL(raw)
+    let redacted = false
+    if (u.username) { u.username = 'redacted'; redacted = true }
+    if (u.password) { u.password = 'redacted'; redacted = true }
+    for (const [k, v] of [...u.searchParams.entries()]) {
+      if (v && SECRET_KEY_RE.test(k)) {
+        u.searchParams.set(k, MASK)
+        redacted = true
+      }
+    }
+    return { value: redacted ? u.toString() : raw, redacted }
+  } catch {
+    return { value: raw, redacted: false }
+  }
+}
+
+function redactArgs(args: string[]): { value: string[]; redacted: boolean } {
+  let redacted = false
+  const out: string[] = []
+  let redactNext = false
+  for (const a of args) {
+    if (redactNext) {
+      out.push(MASK)
+      redacted = true
+      redactNext = false
+      continue
+    }
+    if (SECRET_FLAG_RE.test(a)) {
+      out.push(a)
+      redactNext = true
+      continue
+    }
+    const eq = a.indexOf('=')
+    if (eq > 0 && SECRET_KEY_RE.test(a.slice(0, eq))) {
+      out.push(a.slice(0, eq + 1) + MASK)
+      redacted = true
+      continue
+    }
+    out.push(a)
+  }
+  return { value: out, redacted }
+}
+
+function redactValue(key: string, val: unknown): { value: unknown; redacted: boolean } {
+  if (typeof val === 'string') {
+    if ((key === 'url' || key === 'serverUrl' || key === 'httpUrl') && val) return redactUrl(val)
+    if (!key.endsWith('_env_var') && val && SECRET_KEY_RE.test(key)) return { value: MASK, redacted: true }
+    return { value: val, redacted: false }
+  }
+  if (Array.isArray(val)) {
+    if ((key === 'command' || key === 'args') && val.every((x) => typeof x === 'string')) {
+      return redactArgs(val as string[])
+    }
+    let redacted = false
+    const next = val.map((item) => {
+      const r = redactValue(key, item)
+      if (r.redacted) redacted = true
+      return r.value
+    })
+    return { value: next, redacted }
+  }
+  if (object(val)) {
+    let redacted = false
+    const out: ObjectMap = {}
+    const maskAllStrings = key === 'env' || key === 'environment' || key === 'headers' || key === 'http_headers'
+    for (const [k, v] of Object.entries(val)) {
+      if (maskAllStrings && typeof v === 'string' && v.length > 0) {
+        out[k] = MASK
+        redacted = true
+      } else {
+        const r = redactValue(k, v)
+        if (r.redacted) redacted = true
+        out[k] = r.value
+      }
+    }
+    return { value: out, redacted }
+  }
+  return { value: val, redacted: false }
+}
+
+function redactEntry(entry: ObjectMap): { value: ObjectMap; hasSecrets: boolean } {
+  const r = redactValue('', entry)
+  return { value: r.value as ObjectMap, hasSecrets: r.redacted }
+}
 
 function sources(): Source[] {
   const home = homedir()
   const result: Source[] = []
-  const add = (format: Format, id: string, label: string, file: string, path?: string[]) => {
+  const add = (format: McpFormat, id: string, label: string, file: string, path?: string[]) => {
     if (!result.some((s) => s.file === file && s.path?.join('\0') === path?.join('\0'))) result.push({ format, id, label, file, path })
   }
   const oc = join(home, '.config/opencode/opencode.json')
@@ -97,12 +226,16 @@ async function load(source: Source) {
   if (legacySource(source)) table = Object.fromEntries(Object.entries(table).filter(([, e]) => object(e) && ['local', 'remote'].includes(String(e.type))))
   return { raw, data, path, table, revision: createHash('sha256').update(raw).digest('hex') }
 }
+
 export async function inventory(): Promise<McpInventory> {
   const out: McpInventory = { sources: [], entries: [] }
   for (const s of sources()) {
     try {
       const { revision, table } = await load(s)
-      out.sources.push({ id: s.id, label: s.label, revision, canToggle: ['opencode', 'codex', 'antigravity'].includes(s.format) })
+      out.sources.push({
+        id: s.id, label: s.label, file: displayPath(s.file), format: s.format, revision,
+        canToggle: ['opencode', 'codex', 'antigravity'].includes(s.format),
+      })
       for (const [name, entry] of Object.entries(table)) {
         if (!object(entry)) continue
         const url = entry.url ?? entry.serverUrl ?? entry.httpUrl
@@ -111,7 +244,128 @@ export async function inventory(): Promise<McpInventory> {
         out.entries.push({ source: s.id, name, transport: url ? 'HTTP' : entry.command ? 'stdio' : 'provider', host,
           enabled: entry.disabled !== true && entry.enabled !== false })
       }
-    } catch (e) { out.sources.push({ id: s.id, label: s.label, revision: '', error: (e as Error).message }) }
+    } catch (e) {
+      out.sources.push({ id: s.id, label: s.label, file: displayPath(s.file), format: s.format, revision: '', error: (e as Error).message })
+    }
+  }
+  return out
+}
+
+function extractCommand(entry: ObjectMap): string[] | null {
+  if (Array.isArray(entry.command) && entry.command.every((a) => typeof a === 'string')) return entry.command as string[]
+  if (typeof entry.command === 'string' && entry.command) {
+    const args = Array.isArray(entry.args) ? entry.args.filter((a): a is string => typeof a === 'string') : []
+    return [entry.command, ...args]
+  }
+  return null
+}
+
+function collectKeys(...maps: unknown[]): string[] {
+  const set = new Set<string>()
+  for (const m of maps) {
+    if (object(m)) for (const k of Object.keys(m)) set.add(k)
+    else if (Array.isArray(m)) for (const k of m) if (typeof k === 'string') set.add(k)
+  }
+  return [...set].sort()
+}
+
+export async function readEntry(input: ObjectMap): Promise<McpEntryConfig> {
+  const source = sources().find((s) => s.id === input.source)
+  const name = input.name
+  if (!source || typeof name !== 'string') throw new Error('Choose a configured server.')
+  const { table, revision } = await load(source)
+  const entry = Object.hasOwn(table, name) ? table[name] : undefined
+  if (!object(entry)) throw new Error('This MCP server is no longer configured.')
+
+  const reveal = input.reveal === true
+  const { value: redactedEntry, hasSecrets } = redactEntry(entry)
+  const shown = reveal ? entry : redactedEntry
+  const rawUrl = shown.url ?? shown.serverUrl ?? shown.httpUrl
+  const url = typeof rawUrl === 'string' ? rawUrl : null
+  const command = extractCommand(shown)
+  const cwd = typeof shown.cwd === 'string' ? shown.cwd : null
+  const envKeys = collectKeys(entry.env, entry.environment, entry.env_vars)
+  const headerKeys = collectKeys(entry.headers, entry.http_headers, entry.env_http_headers)
+  if (typeof entry.bearer_token_env_var === 'string' && entry.bearer_token_env_var) {
+    headerKeys.push(`Authorization (${entry.bearer_token_env_var})`)
+  }
+  const configLang = source.format === 'codex' ? 'toml' : 'json'
+  const configText = configLang === 'toml'
+    ? encodeToml({ mcp_servers: { [name]: shown } }).trim()
+    : JSON.stringify({ [name]: shown }, null, 2)
+
+  return {
+    source: source.id,
+    label: source.label,
+    name,
+    file: displayPath(source.file),
+    format: source.format,
+    revision,
+    transport: (entry.url ?? entry.serverUrl ?? entry.httpUrl) ? 'HTTP' : entry.command ? 'stdio' : 'provider',
+    enabled: entry.disabled !== true && entry.enabled !== false,
+    url,
+    command,
+    cwd,
+    envKeys,
+    headerKeys,
+    hasSecrets,
+    revealed: reveal && hasSecrets,
+    configText,
+    configLang,
+  }
+}
+
+export async function readSource(input: ObjectMap): Promise<McpSourceConfig> {
+  const source = sources().find((s) => s.id === input.source)
+  if (!source) throw new Error('Choose a provider.')
+  const { table, path, revision } = await load(source)
+  const reveal = input.reveal === true
+  let hasSecrets = false
+  const shown: ObjectMap = {}
+  for (const [name, entry] of Object.entries(table)) {
+    if (!object(entry)) continue
+    const r = redactEntry(entry)
+    if (r.hasSecrets) hasSecrets = true
+    shown[name] = reveal ? entry : r.value
+  }
+  const count = Object.keys(shown).length
+  const configLang = source.format === 'codex' ? 'toml' : 'json'
+  let configText: string
+  if (configLang === 'toml') {
+    configText = count ? encodeToml({ mcp_servers: shown }).trim() : '# No MCP servers configured in [mcp_servers]'
+  } else {
+    let wrapped: ObjectMap = shown
+    for (let i = path.length - 1; i >= 0; i--) wrapped = { [path[i]!]: wrapped }
+    configText = JSON.stringify(wrapped, null, 2)
+  }
+  return {
+    source: source.id,
+    label: source.label,
+    file: displayPath(source.file),
+    format: source.format,
+    revision,
+    count,
+    hasSecrets,
+    revealed: reveal && hasSecrets,
+    configText,
+    configLang,
+  }
+}
+
+function parseStringMap(raw: unknown, kind: 'env' | 'headers'): Record<string, string> | undefined {
+  if (raw === undefined) return undefined
+  if (!object(raw)) throw new Error(`Invalid ${kind}.`)
+  const entries = Object.entries(raw)
+  const maxKeys = kind === 'env' ? 50 : 30
+  if (entries.length > maxKeys) throw new Error(`Too many ${kind} entries.`)
+  const keyRe = kind === 'env' ? /^[A-Za-z_][A-Za-z0-9_]{0,127}$/ : /^[A-Za-z0-9-]{1,128}$/
+  const out: Record<string, string> = {}
+  for (const [k, v] of entries) {
+    if (!keyRe.test(k) || k in Object.prototype) throw new Error(`Invalid ${kind} key: ${k}`)
+    if (typeof v !== 'string' || v.length > 4000 || v.includes('\0') || (kind === 'headers' && /[\r\n]/.test(v))) {
+      throw new Error(`Invalid ${kind} value for ${k}.`)
+    }
+    out[k] = v
   }
   return out
 }
@@ -160,6 +414,8 @@ async function save(r: ObjectMap) {
   let entry: ObjectMap | undefined
   if (r.action === 'remove') entry = undefined
   else if (r.action === 'create' || r.action === 'edit') {
+    const env = parseStringMap(r.env, 'env')
+    const headers = parseStringMap(r.headers, 'headers')
     entry = object(existing) ? { ...existing } : {}
     if (r.url || r.command) {
       if (r.url && r.command) throw new Error('Choose one transport.')
@@ -172,13 +428,33 @@ async function save(r: ObjectMap) {
         if (source.format === 'opencode') entry.type = 'remote'
         if (source.format === 'claude') entry.type = 'http'
         entry[source.format === 'antigravity' ? 'serverUrl' : source.format === 'gemini' ? 'httpUrl' : 'url'] = url.href
+        if (headers && Object.keys(headers).length) {
+          entry[source.format === 'codex' ? 'http_headers' : 'headers'] = headers
+        }
       } else {
         const args = r.command
         if (!Array.isArray(args) || !args.length || !args[0] || args.length > 100 || !args.every((a) => typeof a === 'string' && a.length <= 4000 && !a.includes('\0'))) throw new Error('Supply the executable and its arguments as a string array.')
         if (source.format === 'opencode') { entry.type = 'local'; entry.command = args }
         else { entry.command = args[0]; entry.args = args.slice(1) }
+        if (env && Object.keys(env).length) {
+          entry[source.format === 'opencode' ? 'environment' : 'env'] = env
+        }
       }
-    } else if (!existing) throw new Error('Supply a URL or command.')
+    } else if (!existing) {
+      throw new Error('Supply a URL or command.')
+    } else {
+      // Editing env or headers on an existing entry without replacing the destination.
+      if (env !== undefined) {
+        const key = source.format === 'opencode' ? 'environment' : 'env'
+        if (Object.keys(env).length) entry[key] = env
+        else delete entry[key]
+      }
+      if (headers !== undefined) {
+        const key = source.format === 'codex' ? 'http_headers' : 'headers'
+        if (Object.keys(headers).length) entry[key] = headers
+        else delete entry[key]
+      }
+    }
     const enabled = r.enabled ?? (!existing || object(existing) && existing.disabled !== true && existing.enabled !== false)
     if (typeof enabled !== 'boolean') throw new Error('Invalid enabled setting.')
     if (source.format === 'codex' || legacySource(source)) entry.enabled = enabled

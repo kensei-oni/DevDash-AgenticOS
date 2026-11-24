@@ -1,4 +1,4 @@
-import type { McpInventory } from '../../../../agent/src/member-mcps.ts'
+import type { McpEntryConfig, McpInventory, McpSourceConfig } from '../../../../agent/src/member-mcps.ts'
 import type { ProviderSkill, ProviderSkillDetail } from '../../../../agent/src/skills.ts'
 export type { ProviderSkill, ProviderSkillDetail }
 import { Hono } from 'hono'
@@ -61,6 +61,8 @@ export const McpChange = z.object({
   source: z.string().max(200), name: Folder, revision: z.string().regex(/^[a-f0-9]{64}$/),
   action: z.enum(['create', 'edit', 'remove']), enabled: z.boolean().optional(), url: z.string().max(4000).optional(),
   command: z.array(z.string().max(4000)).max(100).optional(),
+  env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/), z.string().max(4000)).optional(),
+  headers: z.record(z.string().regex(/^[A-Za-z0-9-]{1,128}$/), z.string().max(4000)).optional(),
 })
 
 export function skillsRoutes(agents: AgentsService, projects: ProjectsService, mw: ReturnType<typeof authMiddleware>) {
@@ -81,6 +83,14 @@ export function skillsRoutes(agents: AgentsService, projects: ProjectsService, m
   return new Hono<AuthEnv>()
     .use(mw.requireUser)
     .get('/mcps', async (c) => c.json(await ask<McpInventory>(as(c), { op: 'mcps.list' })))
+    .get('/mcps/entry', query(z.object({ source: z.string().min(1).max(200), name: Folder, reveal: z.enum(['0', '1']).optional() })), async (c) => {
+      const { source, name, reveal } = c.req.valid('query')
+      return c.json(await ask<McpEntryConfig>(as(c), { op: 'mcps.read', source, name, reveal: reveal === '1' }))
+    })
+    .get('/mcps/source', query(z.object({ source: z.string().min(1).max(200), reveal: z.enum(['0', '1']).optional() })), async (c) => {
+      const { source, reveal } = c.req.valid('query')
+      return c.json(await ask<McpSourceConfig>(as(c), { op: 'mcps.readSource', source, reveal: reveal === '1' }))
+    })
     .post('/mcps/check', json(McpChange.pick({ source: true, name: true, revision: true })), async (c) =>
       c.json(await ask<{status: string}>(as(c), { ...c.req.valid('json'), op: 'mcps.check' })))
     .post('/mcps', json(McpChange), async (c) => c.json(await ask(as(c), { ...c.req.valid('json'), op: 'mcps.change' })))

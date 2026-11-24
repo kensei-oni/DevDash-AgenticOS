@@ -172,6 +172,8 @@ const ops: Record<string, (r: Req) => Promise<unknown> | unknown> = {
   'skills.list': (r) => skills.ops.list(r),
   'skills.providerRead': (r) => skills.ops.providerRead(r),
   'mcps.list': () => memberMcps.inventory(),
+  'mcps.read': (r) => memberMcps.readEntry(r),
+  'mcps.readSource': (r) => memberMcps.readSource(r),
   'mcps.check': (r) => memberMcps.check(r),
   'mcps.change': async (r) => { await memberMcps.change(r); return { ok: true } },
   'skills.get': (r) => skills.ops.get(r),
