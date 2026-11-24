@@ -252,3 +252,13 @@ test('t3-update starts its own update unit without waiting; its status is read-o
   assert.equal(s.state, 'inactive')
   assert.deepEqual(s.planned, [])
 })
+
+test('codex-update starts its own update unit without waiting; its status is read-only', () => {
+  const r = call({ cmd: 'codex-update' })
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.planned, ['systemctl start --no-block devdash-codex-update.service'])
+  const s = call({ cmd: 'codex-update-status' }) as unknown as { ok: boolean; state: string; planned: string[] }
+  assert.equal(s.ok, true)
+  assert.equal(s.state, 'inactive')
+  assert.deepEqual(s.planned, [])
+})

@@ -37,6 +37,14 @@ fi
 
 # Keep the two newest versions.
 ls -1dt "$BASE"/[0-9]*/ | tail -n +3 | xargs -r rm -rf
+
+# Restart active member-owned T3 Code services so they pick up the updated OpenCode binary.
+UNITS=$(systemctl list-units --type=service --state=active --plain --no-legend 'devdash-t3@*.service' 2>/dev/null | awk '{print $1}' || true)
+if [[ -n $UNITS ]]; then
+  for u in $UNITS; do
+    systemctl restart "$u" || echo "warning: failed to restart $u" >&2
+  done
+fi
 echo "opencode: $("$BASE/current/bin/opencode" --version)"
 }
 main "$@"

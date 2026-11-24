@@ -21,6 +21,10 @@ export function statusRoutes(status: StatusService, deploys: ReturnType<typeof d
       await status.updateT3()
       return c.json({ ok: true })
     })
+    .post('/codex-update', mw.requireAdmin, async (c) => {
+      await status.updateCodex()
+      return c.json({ ok: true })
+    })
     .post('/browser-update', mw.requireAdmin, async (c) => {
       await status.updateBrowser()
       return c.json({ ok: true })

@@ -139,6 +139,8 @@ export function statusService({ db, agents, services, browser, runDir, dataDir, 
   }).then((r) => r.json() as Promise<{ tag_name?: string }>).then((j) => j.tag_name?.replace(/^v/, '') || null)
   // T3 Code comes from pingdotgg/t3code GitHub releases; deploy/t3-update.sh swaps /opt/devdash/t3code/current and restarts active member services.
   const t3code = agentInstall({ name: 't3', read: ran('/opt/devdash/t3code/current/t3'), installed: linked('t3code'), newest: githubLatest('pingdotgg/t3code') })
+  // Codex CLI comes from openai/codex standalone releases; deploy/codex-update.sh swaps /opt/devdash/codex/current and restarts active member T3 services.
+  const codex = agentInstall({ name: 'codex', read: ran('/opt/devdash/codex/current/bin/codex'), installed: linked('codex'), newest: npmLatest('@openai/codex') })
   // The team browser: neko's image. An update downloads its newest release of the major version the root helper speaks
   // (its settings and API), which the browser runs from its next start.
   let neko: { image: string; major: number } | null = null
@@ -171,6 +173,7 @@ export function statusService({ db, agents, services, browser, runDir, dataDir, 
           claudeSdk: await claude.state(),
           opencode: { version: await opencode.version(), ...(await opencode.state()) },
           t3code: { version: await t3code.version(), ...(await t3code.state()) },
+          codex: { version: await codex.version(), ...(await codex.state()) },
           browser: await teamBrowser.state(),
         },
         backup: backup ? JSON.parse(backup) as { at: number; ok: boolean; snapshot: string; bytes: number; offsite: boolean; note: string } : null,
@@ -187,6 +190,8 @@ export function statusService({ db, agents, services, browser, runDir, dataDir, 
     updateOpencode: () => opencode.update(),
     /** Admins: install T3 Code, or update it to the latest release, for everyone. */
     updateT3: () => t3code.update(),
+    /** Admins: install Codex CLI, or update it to the latest release, for everyone. */
+    updateCodex: () => codex.update(),
     /** Admins: the team browser to the newest release of its version line. */
     updateBrowser: () => teamBrowser.update(),
 

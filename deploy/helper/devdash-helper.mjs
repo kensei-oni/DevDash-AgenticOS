@@ -704,6 +704,16 @@ const commands = {
     return unitState('devdash-t3-update.service')
   },
 
+  /** Installs or updates Codex CLI for everyone to the latest release (deploy/codex-update.sh), in the background. */
+  'codex-update'() {
+    run('systemctl', ['start', '--no-block', 'devdash-codex-update.service'])
+    return {}
+  },
+
+  'codex-update-status'() {
+    return unitState('devdash-codex-update.service')
+  },
+
   /**
    * Deploys a commit of DevDash's GitHub repository (deploy/self-deploy.sh), in the background, after an admin
    * approved it. The script checks the commit is on the repository's main branch. One deploy at a time.
