@@ -44,6 +44,7 @@ type PairedDevice = {
   port: number
   enabled: boolean
   allowShell: boolean
+  allowedFolders: string[]
   isDefault: boolean
   createdAt: number
   updatedAt: number
@@ -67,6 +68,7 @@ type PairedDevice = {
 }
 
 type PcStatus = {
+  globalPaused: boolean
   tailnet: { connected: boolean; backendState: string; vpsIp: string | null; vpsName: string | null; devices: TailnetDevice[] }
   devices: PairedDevice[]
   mcpProviders: McpProvider[]
@@ -103,18 +105,21 @@ export function PcPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [adding, setAdding] = useState(false)
   const [showSetup, setShowSetup] = useState(false)
+  const [folderInput, setFolderInput] = useState('')
 
   const devices = s?.devices ?? []
   const active = devices.find((d) => d.id === selectedId) ?? devices[0] ?? null
 
   const settings = useMutation({
-    mutationFn: (patch: { deviceId: number; enabled?: boolean; allowShell?: boolean; rotateToken?: boolean; setDefault?: boolean }) =>
+    mutationFn: (patch: { deviceId?: number; enabled?: boolean; allowShell?: boolean; allowedFolders?: string[]; globalPaused?: boolean; rotateToken?: boolean; setDefault?: boolean }) =>
       unwrap(api.api.pc.settings.$patch({ json: patch })) as Promise<PcStatus>,
     onSuccess: (next, vars) => {
       qc.setQueryData(['pc', 'status'], next)
       if (vars.rotateToken) toast.success('Secret token rotated — re-run the installer on that device')
       else if (vars.setDefault) toast.success('Updated default device for AI agents')
       else if (vars.enabled !== undefined) toast.success(vars.enabled ? 'Device control enabled' : 'Device control paused')
+      else if (vars.globalPaused !== undefined) toast.success(vars.globalPaused ? 'Paused all Computer Use on server' : 'Resumed Computer Use on server')
+      else if (vars.allowedFolders !== undefined) toast.success('Updated allowed folders')
       else if (vars.allowShell !== undefined) toast.success(vars.allowShell ? 'Shell access enabled' : 'Shell access turned off')
     },
     onError: (e: Error) => toast.error(e.message),
@@ -146,7 +151,7 @@ export function PcPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
-  const ready = Boolean(active?.enabled && s?.tailnet.connected && active.peer?.online && active.agent?.ok && !active.agent.paused)
+  const ready = Boolean(!s?.globalPaused && active?.enabled && s?.tailnet.connected && active.peer?.online && active.agent?.ok && !active.agent.paused)
   const isAndroid = active?.platform === 'android'
 
   return (
@@ -156,6 +161,16 @@ export function PcPage() {
         description="Codex-grade computer use for your Windows PC & Android phone — locked strictly to Tailscale"
         actions={
           <div className="flex items-center gap-1.5">
+            {devices.length > 0 && s && (
+              <Button
+                variant={s.globalPaused ? 'default' : 'secondary'}
+                size="sm"
+                disabled={settings.isPending}
+                onClick={() => settings.mutate({ globalPaused: !s.globalPaused })}
+              >
+                {s.globalPaused ? 'Resume in DevDash' : 'Pause all'}
+              </Button>
+            )}
             {devices.length > 0 && (
               <Button variant="secondary" size="sm" onClick={() => setAdding((v) => !v)}>
                 <Plus className="size-4" />{adding ? 'Cancel' : 'Add device'}
@@ -302,9 +317,48 @@ export function PcPage() {
                   </div>
                   <Switch checked={active.allowShell} disabled={settings.isPending} onCheckedChange={(allowShell) => settings.mutate({ deviceId: active.id, allowShell })} />
                 </div>
+                <div className="flex flex-col gap-2 border-t border-border/60 pt-4">
+                  <div>
+                    <div className="text-sm font-medium">Allowed folders (file tools)</div>
+                    <p className="text-xs text-muted-foreground">File read/write tools are blocked outside these folders. Empty = all file tools blocked.</p>
+                  </div>
+                  <div className="flex gap-1.5">
+                    <Input
+                      value={folderInput}
+                      onChange={(e) => setFolderInput(e.target.value)}
+                      placeholder={isAndroid ? '/sdcard/Download' : 'C:\\Users\\ken\\Projects'}
+                      className="h-8 font-mono text-xs"
+                    />
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={settings.isPending || !folderInput.trim()}
+                      onClick={() => {
+                        const next = Array.from(new Set([...(active.allowedFolders ?? []), folderInput.trim()]))
+                        settings.mutate({ deviceId: active.id, allowedFolders: next })
+                        setFolderInput('')
+                      }}
+                    >Add</Button>
+                  </div>
+                  {(active.allowedFolders ?? []).length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {active.allowedFolders.map((folder) => (
+                        <span key={folder} className="inline-flex items-center gap-1.5 rounded-md bg-background px-2 py-0.5 font-mono text-[11px] text-foreground">
+                          <span className="max-w-[200px] truncate">{folder}</span>
+                          <button
+                            type="button"
+                            className="text-muted-foreground hover:text-destructive"
+                            onClick={() => settings.mutate({ deviceId: active.id, allowedFolders: active.allowedFolders.filter((f) => f !== folder) })}
+                            aria-label={`Remove ${folder}`}
+                          >×</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <div className="flex items-center justify-between gap-2 border-t border-border/60 pt-3">
                   <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <ShieldCheck className="size-3.5" />Tailscale-only + token locked
+                    <ShieldCheck className="size-3.5" />Personal Chat only · permission prompts on
                   </span>
                   <Button variant="ghost" size="sm" disabled={settings.isPending} onClick={() => { if (confirm('Rotate secret token? You will need to re-run the installer on this device once.')) settings.mutate({ deviceId: active.id, rotateToken: true }) }}>
                     <RotateCcw className="size-3.5" />Rotate token
@@ -420,7 +474,7 @@ export function PcPage() {
             <section className="flex flex-col gap-3">
               <h3 className="text-base font-semibold tracking-[-0.01em]">Recent activity</h3>
               {s.audit.length === 0 ? (
-                <p className="rounded-2xl bg-surface p-4 text-sm text-muted-foreground">No actions yet. Ask Codex, Claude, OpenCode, or Hamasa to inspect or control your PC or Android phone once connected.</p>
+                <p className="rounded-2xl bg-surface p-4 text-sm text-muted-foreground">No actions yet. Start a personal (unshared) DevDash Chat session to inspect or control your PC or Android phone. Shell, file writes, and input always prompt you for approval.</p>
               ) : (
                 <ul className="flex flex-col gap-0.5 rounded-2xl bg-surface p-1.5">
                   {s.audit.map((a) => (
@@ -472,7 +526,7 @@ function PairSection({ s, onPaired }: { s: PcStatus; onPaired: (next: PcStatus, 
   const [platform, setPlatform] = useState<DevicePlatform>(initialPlatform)
   const [tailscaleIp, setTailscaleIp] = useState(defaultDev?.ip ?? '')
   const [port, setPort] = useState(initialPlatform === 'android' ? '47822' : '47821')
-  const [allowShell, setAllowShell] = useState(true)
+  const [allowShell, setAllowShell] = useState(false)
 
   const pair = useMutation({
     mutationFn: () =>

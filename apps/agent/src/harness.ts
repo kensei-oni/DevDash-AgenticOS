@@ -9,7 +9,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { notFound, PROTOCOL_VERSION, Rpc, Transcriber, type ToolCall, type Usage } from './acp.ts'
 import {
-  cliSession, ensureStorage, IDLE_CLOSE_MS, nonPersonalRules, pageOf, PLUGIN_DIR, PROFILE_RE, setupTailnet, systemAppend, teardownTailnet, validate,
+  cliSession, ensureStorage, IDLE_CLOSE_MS, nonPersonalRules, pageOf, pcRequiresPermission, personalPcMcpEligible, PLUGIN_DIR, PROFILE_RE, setupTailnet, systemAppend, teardownTailnet, validate,
   type Guest, type HistoryMessage, type Launch, type Pending, type Status,
 } from './claude.ts'
 import { guestMay } from './guest.ts'
@@ -250,6 +250,13 @@ async function startChat(l: Launch, configureSelection = false): Promise<Chat> {
   if (l.harness !== 't3code') writeFileSync(rulesFile, systemAppend(l), { mode: 0o600 })
   const mcp: Parameters<Agent['sessionEnv']>[0]['mcp'] = {
     devdash: { type: 'local', command: [process.execPath, join(PLUGIN_DIR, 'mcp', 'devdash.mjs')], environment: { DEVDASH_AGENT_SOCKET: process.env.DEVDASH_AGENT_SOCKET ?? '', DEVDASH_SESSION_ID: l.id } },
+  }
+  if (personalPcMcpEligible(l)) {
+    mcp['my-pc'] = {
+      type: 'local',
+      command: [process.execPath, join(PLUGIN_DIR, 'mcp', 'pc.mjs')],
+      environment: { DEVDASH_AGENT_SOCKET: process.env.DEVDASH_AGENT_SOCKET ?? '', DEVDASH_SESSION_ID: l.id },
+    }
   }
   for (const [name, s] of Object.entries(tn?.mcpServers ?? {})) mcp[name] = { type: 'remote', url: (s as { url: string }).url }
   const hideSkills = (await sessionSkills(l.cwd).catch(() => null))?.hide
@@ -547,6 +554,10 @@ async function permission(c: Chat, p: Record<string, unknown>) {
   if (policy === 'allow') return pick('allow_once')
   // "Don't ask" (a team role's shift, which nobody watches): what isn't allowed up front is denied, as in Claude Code.
   if (l.permissionMode === 'dontAsk') return pick('reject_once')
+  if (pcRequiresPermission(name, input)) {
+    const r = await ask(c, name, input)
+    return pick(r.behavior === 'allow' ? 'allow_once' : 'reject_once')
+  }
   if (autoAllowed(l.permissionMode, name) || c.always.has(key)) return pick('allow_once')
   const r = await ask(c, name, input, { always: key })
   if (r.behavior === 'allow' && r.updatedPermissions?.length) saveAlways(c, key)

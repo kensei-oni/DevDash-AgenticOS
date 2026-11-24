@@ -51,6 +51,8 @@ export type Launch = {
   /** Added to Claude's system prompt after DevDash's own rules (sessions other features start, e.g. a team role's). */
   instructions?: string | null
   originKind?: string | null
+  /** True when the session is shared with teammates (blocks personal computer-use MCP injection). */
+  shared?: boolean
   /** Limits the session: `tools` = the built-in tools it has, `allow` = the tools that run without asking. */
   toolPolicy?: { tools?: string[]; allow?: string[] } | null
   /** Reach my tailnet: route the session's shell tools (ssh/curl/frida) through the owner's SOCKS/HTTP proxy. */
@@ -282,6 +284,31 @@ export const systemAppend = (l: Launch) => {
 // Questions and plan approvals need a person in every mode. Bypass mode skips canUseTool entirely, so these two
 // tools are routed through a PreToolUse hook instead, which always runs.
 const INTERACTIVE = new Set(['AskUserQuestion', 'ExitPlanMode'])
+const PC_MUTATING_TOOLS = new Set([
+  'pc_run_powershell', 'pc_click', 'pc_move_mouse', 'pc_drag', 'pc_scroll',
+  'pc_type_text', 'pc_set_value', 'pc_press_key', 'pc_window_action',
+  'pc_launch_app', 'pc_kill_app',
+])
+
+/** True when a Computer Use MCP call performs shell, file mutation, clipboard write, or UI input and must ask the member. */
+export function pcRequiresPermission(toolName: string, input: Record<string, unknown> = {}): boolean {
+  const m = /^(?:mcp__.+__|[a-z0-9-]+_)?(pc_[a-z_]+)$/.exec(toolName)
+  if (!m) return false
+  const short = m[1]!
+  if (PC_MUTATING_TOOLS.has(short)) return true
+  if (short === 'pc_fs') {
+    const mode = typeof input.mode === 'string' ? input.mode.toLowerCase() : ''
+    return mode !== 'list' && mode !== 'read' && mode !== 'stat'
+  }
+  if (short === 'pc_clipboard') {
+    return input.mode === 'set'
+  }
+  return false
+}
+
+export function personalPcMcpEligible(l: Launch): boolean {
+  return !l.shared && !l.originKind && !l.toolPolicy && !!process.env.DEVDASH_AGENT_SOCKET
+}
 const WEEK_S = 7 * 86_400
 
 /** Makes sure the owner's Drive remote is in their rclone config before Claude starts (a new profile, a deleted file). */
@@ -318,7 +345,20 @@ async function startChat(l: Launch): Promise<Chat> {
     options: {
       cwd: l.cwd,
       env: { ...process.env, ...profileEnv(l.profile), ...subagentEnv(l), DEVDASH_SESSION_ID: l.id, ...(tn?.env ?? {}) },
-      ...(tn?.mcpServers ? { mcpServers: tn.mcpServers } : {}),
+      ...(() => {
+        const servers: Record<string, unknown> = { ...(tn?.mcpServers ?? {}) }
+        if (personalPcMcpEligible(l)) {
+          servers['my-pc'] = {
+            command: process.execPath,
+            args: [join(PLUGIN_DIR, 'mcp', 'pc.mjs')],
+            env: {
+              DEVDASH_AGENT_SOCKET: process.env.DEVDASH_AGENT_SOCKET ?? '',
+              DEVDASH_SESSION_ID: l.id,
+            },
+          }
+        }
+        return Object.keys(servers).length ? { mcpServers: servers } : {}
+      })(),
       pathToClaudeCodeExecutable: CLAUDE_BIN,
       ...(l.started ? { resume: l.id } : { sessionId: l.id }),
       ...(l.model ? { model: l.model } : {}),
@@ -341,6 +381,23 @@ async function startChat(l: Launch): Promise<Chat> {
           timeout: WEEK_S, // people answer from their phone, maybe much later
           hooks: [async (h: { tool_name: string; tool_input: Record<string, unknown> }, _id: string | undefined, o: { signal: AbortSignal }) => {
             const r = await ask(h.tool_name, h.tool_input, undefined, o.signal)
+            return {
+              hookSpecificOutput: r.behavior === 'allow'
+                ? { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: r.updatedInput ?? h.tool_input }
+                : { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: r.message },
+            }
+          }],
+        }, {
+          // Computer Use gate: shell, file writes, clipboard writes, and device input always prompt the member in DevDash.
+          matcher: 'mcp__.*__pc_.*',
+          timeout: WEEK_S,
+          hooks: [async (h: { tool_name: string; tool_input: Record<string, unknown> }, _id: string | undefined, o: { signal: AbortSignal }) => {
+            if (!pcRequiresPermission(h.tool_name, h.tool_input ?? {})) return {}
+            const r = await ask(h.tool_name, h.tool_input ?? {}, undefined, o.signal, undefined, {
+              title: `Device action: ${h.tool_name.replace(/^mcp__[^_]+__/, '')}`,
+              description: 'Approve before DevDash runs shell, file writes, or input on your personal device.',
+              noAlwaysAllow: true,
+            })
             return {
               hookSpecificOutput: r.behavior === 'allow'
                 ? { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: r.updatedInput ?? h.tool_input }

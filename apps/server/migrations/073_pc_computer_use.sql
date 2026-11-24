@@ -8,7 +8,7 @@ create table pc_devices (
   port integer not null default 47821,
   token_sealed text not null,
   enabled integer not null default 1,
-  allow_shell integer not null default 1,
+  allow_shell integer not null default 0,
   created_at integer not null default (unixepoch()),
   updated_at integer not null default (unixepoch()),
   last_seen_at integer

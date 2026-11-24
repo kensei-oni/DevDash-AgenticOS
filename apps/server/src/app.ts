@@ -178,7 +178,7 @@ export function createApp({ db, config }: { db: Db; config: Config }) {
   team = teamPlugin({ db, hub, agents, claude, projects, activity, tasks, notify: notifications.notify, masterKey: config.masterKey, mw, onProposalIdle: (s) => void reviews!.record(s) }) // Team
   // Per-user tailnets: keep net_* tools out of team role sessions (Team may be off, so roleOf is optional).
   tailnet = tailnetService({ db, agents, masterKey: config.masterKey, runDir: config.runDir, isRole: (u, s) => !!team?.service?.roleOf(u, s) })
-  const pc = pcService({ db, agents, tailnet, masterKey: config.masterKey })
+  const pc = pcService({ db, agents, tailnet, masterKey: config.masterKey, isRole: (u, s) => !!team?.service?.roleOf(u, s) })
   const status = statusService({ db, agents, services, browser, runDir: config.runDir, dataDir: config.dataDir, version: config.version })
   const deploys = deployService({ db, agents, projects, notify: notifications.notify, runDir: config.runDir, repo: config.repo, token: config.githubToken, live: status.release })
   const avatars = avatarsService({ db, hub })

@@ -41,3 +41,39 @@ describe('pc-bridge', () => {
     assert.deepEqual(res.data, { ok: true, count: 2 })
   })
 })
+
+import { pcRequiresPermission, personalPcMcpEligible } from './claude.ts'
+
+describe('Computer Use agent gates', () => {
+  it('requires permission for shell, input, file writes, and clipboard writes across naming styles', () => {
+    assert.equal(pcRequiresPermission('mcp__my-pc__pc_run_powershell', { command: 'dir' }), true)
+    assert.equal(pcRequiresPermission('my-pc_pc_click', { x: 10, y: 20 }), true)
+    assert.equal(pcRequiresPermission('pc_type_text', { text: 'hi' }), true)
+    assert.equal(pcRequiresPermission('mcp__my-pc__pc_fs', { mode: 'write', path: 'C:\\Work\\a.txt' }), true)
+    assert.equal(pcRequiresPermission('mcp__my-pc__pc_fs', { mode: 'delete', path: 'C:\\Work\\a.txt' }), true)
+    assert.equal(pcRequiresPermission('mcp__my-pc__pc_clipboard', { mode: 'set', text: 'abc' }), true)
+
+    // Read-only inspection tools do not require extra confirmation
+    assert.equal(pcRequiresPermission('mcp__my-pc__pc_screenshot', {}), false)
+    assert.equal(pcRequiresPermission('mcp__my-pc__pc_list_devices', {}), false)
+    assert.equal(pcRequiresPermission('mcp__my-pc__pc_fs', { mode: 'list', path: 'C:\\Work' }), false)
+    assert.equal(pcRequiresPermission('mcp__my-pc__pc_fs', { mode: 'read', path: 'C:\\Work\\a.txt' }), false)
+    assert.equal(pcRequiresPermission('mcp__my-pc__pc_clipboard', { mode: 'get' }), false)
+    assert.equal(pcRequiresPermission('Bash', { command: 'ls' }), false)
+  })
+
+  it('only injects personal my-pc MCP in unshared, non-role, non-assistant sessions', () => {
+    const prev = process.env.DEVDASH_AGENT_SOCKET
+    process.env.DEVDASH_AGENT_SOCKET = '/run/devdash/agent-ken.sock'
+    try {
+      const base = { id: 's1', profile: 'default', cwd: '/home/ken', model: null, effort: null, permissionMode: 'default' as const, started: false }
+      assert.equal(personalPcMcpEligible(base), true)
+      assert.equal(personalPcMcpEligible({ ...base, shared: true }), false)
+      assert.equal(personalPcMcpEligible({ ...base, originKind: 'assistant' }), false)
+      assert.equal(personalPcMcpEligible({ ...base, toolPolicy: { tools: ['Read'] } }), false)
+    } finally {
+      if (prev === undefined) delete process.env.DEVDASH_AGENT_SOCKET
+      else process.env.DEVDASH_AGENT_SOCKET = prev
+    }
+  })
+})

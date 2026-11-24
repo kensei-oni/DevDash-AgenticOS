@@ -7,6 +7,7 @@ import { userInfo } from 'node:os'
 import { createInterface } from 'node:readline'
 
 const SOCKET = process.env.DEVDASH_AGENT_SOCKET || `/run/devdash/agent-${process.env.USER || userInfo().username}.sock`
+const SESSION_ID = process.env.DEVDASH_SESSION_ID || ''
 const deviceProp = {
   type: 'string',
   description: 'Optional target device selector: device name (e.g. "DESKTOP-LGSA21G" or "Kensei\'s A36"), platform ("windows" or "android"), or Tailscale IP. Omit to use the default device.',
@@ -260,7 +261,7 @@ async function handle(m) {
         throw Object.assign(new Error(`Unknown tool ${name}`), { code: -32602 })
       }
       try {
-        const result = await call('mcp.pc_tool', { tool: name, args: m.params?.arguments ?? {} })
+        const result = await call('mcp.pc_tool', { tool: name, args: m.params?.arguments ?? {}, sessionId: SESSION_ID || undefined })
         const content = []
         if (result && typeof result === 'object' && typeof result.screenshotBase64 === 'string') {
           const { screenshotBase64, mimeType, ...meta } = result

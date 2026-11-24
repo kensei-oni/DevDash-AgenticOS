@@ -324,7 +324,7 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
     }
   }
   // Every launch also says whether the owner's Drive is connected: the agent sets up the remote and tells Claude about it.
-  const launch = (s: SessionRow) => ({ ...baseLaunch(s), storage: s.drive === 0 ? null : storageFor?.(s.owner_id) ?? null, ownerName: s.owner_name, subagentModel: s.harness === 'claude' ? (subagentModelFor?.(s.owner_id) ?? null) : null })
+  const launch = (s: SessionRow) => ({ ...baseLaunch(s), shared: s.shared === 1, storage: s.drive === 0 ? null : storageFor?.(s.owner_id) ?? null, ownerName: s.owner_name, subagentModel: s.harness === 'claude' ? (subagentModelFor?.(s.owner_id) ?? null) : null })
   // The owner, everyone while it's shared with the team, or the members it's shared with by name.
   const privateHamasa = (s: SessionRow) => s.harness === 't3code' && s.origin_kind === 'assistant'
   const canView = (u: Pick<User, 'id'>, s: SessionRow) => s.owner_id === u.id || (!privateHamasa(s) && (s.shared === 1 || repo.isViewer(s.id, u.id)))

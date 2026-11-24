@@ -16,6 +16,8 @@ const Settings = z.object({
   deviceId: z.number().int().positive().optional(),
   enabled: z.boolean().optional(),
   allowShell: z.boolean().optional(),
+  allowedFolders: z.array(z.string().min(1).max(260)).max(32).optional(),
+  globalPaused: z.boolean().optional(),
   rotateToken: z.boolean().optional(),
   setDefault: z.boolean().optional(),
 })

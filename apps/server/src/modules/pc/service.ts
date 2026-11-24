@@ -12,6 +12,7 @@ import { renderAndroidInstallerScript } from './android-agent.ts'
 export const DEFAULT_PC_PORT = 47821
 export const DEFAULT_ANDROID_PORT = 47822
 export const PC_MCP_NAME = 'my-pc'
+export const AUDIT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
 export type DevicePlatform = 'windows' | 'android'
 
@@ -25,6 +26,7 @@ type PcDeviceRow = {
   token_sealed: string
   enabled: number
   allow_shell: number
+  allowed_folders: string
   is_default: number
   created_at: number
   updated_at: number
@@ -46,6 +48,49 @@ type PcAuditRow = {
 type McpInventory = {
   sources: { id: string; label: string; revision: string; canToggle?: boolean; error?: string }[]
   entries: { source: string; name: string; transport: string; host: string | null; enabled: boolean }[]
+}
+
+export function normalizeFolderPath(raw: string, platform: DevicePlatform): string {
+  let p = raw.trim().replace(/\0/g, '')
+  if (!p) return ''
+  if (platform === 'windows') {
+    p = p.replace(/\//g, '\\').replace(/\\+/g, '\\')
+    // Reject relative or traversal segments
+    const parts = p.split('\\')
+    if (parts.some((seg) => seg === '..' || seg === '.')) return ''
+    if (!/^[a-zA-Z]:\\/.test(p)) return ''
+    return p.length > 3 ? p.replace(/\\+$/, '').toLowerCase() : p.toLowerCase()
+  }
+  p = p.replace(/\\/g, '/').replace(/\/+/g, '/')
+  if (!p.startsWith('/')) return ''
+  const parts = p.split('/')
+  if (parts.some((seg) => seg === '..' || seg === '.')) return ''
+  return p.length > 1 ? p.replace(/\/+$/, '') : p
+}
+
+export function isPathAllowed(targetPath: string, allowedFolders: string[], platform: DevicePlatform): boolean {
+  const norm = normalizeFolderPath(targetPath, platform)
+  if (!norm) return false
+  const sep = platform === 'windows' ? '\\' : '/'
+  for (const folder of allowedFolders) {
+    const root = normalizeFolderPath(folder, platform)
+    if (!root) continue
+    if (norm === root) return true
+    const prefix = root.endsWith(sep) ? root : root + sep
+    if (norm.startsWith(prefix)) return true
+  }
+  return false
+}
+
+function parseAllowedFolders(raw: string | null | undefined): string[] {
+  if (!raw) return []
+  try {
+    const arr = JSON.parse(raw)
+    if (!Array.isArray(arr)) return []
+    return arr.filter((v): v is string => typeof v === 'string' && v.trim().length > 0).map((v) => v.trim())
+  } catch {
+    return []
+  }
 }
 
 export function isTailscaleIp(ip: string): boolean {
@@ -96,11 +141,13 @@ export function pcService({
   agents,
   tailnet,
   masterKey,
+  isRole,
 }: {
   db: Db
   agents: AgentsService
   tailnet: TailnetService
   masterKey: Buffer
+  isRole?: (username: string, sessionId: string) => boolean
 }) {
   const q = {
     userByName: db.prepare('select id, username, name, email, role from users where username = ? and disabled_at is null'),
@@ -120,21 +167,66 @@ export function pcService({
     `),
     clearDefault: db.prepare('update pc_devices set is_default = 0 where user_id = ?'),
     setDefault: db.prepare('update pc_devices set is_default = 1 where user_id = ? and id = ?'),
-    updateSettings: db.prepare('update pc_devices set enabled = ?, allow_shell = ?, updated_at = unixepoch() where user_id = ? and id = ?'),
+    updateSettings: db.prepare('update pc_devices set enabled = ?, allow_shell = ?, allowed_folders = ?, updated_at = unixepoch() where user_id = ? and id = ?'),
+    memberSettings: db.prepare('select paused from pc_member_settings where user_id = ?'),
+    setMemberPaused: db.prepare(`
+      insert into pc_member_settings (user_id, paused, updated_at) values (?, ?, unixepoch())
+      on conflict(user_id) do update set paused = excluded.paused, updated_at = unixepoch()
+    `),
+    sessionById: db.prepare('select id, owner_id, shared, archived, origin_kind, origin_role from claude_sessions where id = ?'),
+    sessionHasViewers: db.prepare('select 1 from claude_session_viewers where session_id = ? limit 1'),
+    lastSender: db.prepare('select user_id, message_uuid from claude_message_senders where session_id = ? order by rowid desc limit 1'),
+    isAutopilotMsg: db.prepare('select 1 from autopilot_sent where uuid = ? limit 1'),
     rotateToken: db.prepare('update pc_devices set token_sealed = ?, updated_at = unixepoch() where user_id = ? and id = ?'),
     touchSeen: db.prepare('update pc_devices set last_seen_at = unixepoch() where id = ?'),
     removeById: db.prepare('delete from pc_devices where user_id = ? and id = ?'),
     removeAll: db.prepare('delete from pc_devices where user_id = ?'),
     addAudit: db.prepare('insert into pc_audit_log (user_id, device_id, source, action, summary, ok, duration_ms) values (?, ?, ?, ?, ?, ?, ?)'),
-    pruneAudit: db.prepare('delete from pc_audit_log where user_id = ? and id not in (select id from pc_audit_log where user_id = ? order by id desc limit 200)'),
+    pruneAudit: db.prepare('delete from pc_audit_log where user_id = ? and created_at < unixepoch() - ?'),
     recentAudit: db.prepare(`
       select a.id, a.device_id, d.name as device_name, a.source, a.action, a.summary, a.ok, a.duration_ms, a.created_at
       from pc_audit_log a
       left join pc_devices d on d.id = a.device_id
       where a.user_id = ?
       order by a.id desc
-      limit 40
+      limit 100
     `),
+  }
+
+  function isGlobalPaused(userId: number): boolean {
+    const row = q.memberSettings.get(userId) as { paused: number } | undefined
+    return row?.paused === 1
+  }
+
+  /**
+   * Server-side enforcement: Computer Use MCP tools may ONLY run inside a personal, unshared,
+   * member-owned, member-driven Chat session (never shared sessions, team roles, Hamasa, Autopilot, or plain scripts).
+   */
+  function assertPersonalSession(user: User, sessionId: string | undefined) {
+    if (!sessionId || typeof sessionId !== 'string') {
+      throw new AppError(403, 'pc_session_forbidden', 'Computer Use tools only run inside a personal DevDash Chat session owned by you.')
+    }
+    const s = q.sessionById.get(sessionId) as {
+      id: string; owner_id: number; shared: number; archived: number; origin_kind: string | null; origin_role: string | null
+    } | undefined
+    if (!s || s.owner_id !== user.id || s.archived !== 0) {
+      throw new AppError(403, 'pc_session_forbidden', 'This session is not an active session owned by you.')
+    }
+    if (s.shared !== 0 || q.sessionHasViewers.get(s.id)) {
+      throw new AppError(403, 'pc_session_forbidden', 'Computer Use is blocked in shared sessions where teammates can view or send messages.')
+    }
+    if (s.origin_kind || s.origin_role || isRole?.(user.username, s.id)) {
+      throw new AppError(403, 'pc_session_forbidden', 'Computer Use is blocked in role, Hamasa, and background agent sessions.')
+    }
+    const last = q.lastSender.get(s.id) as { user_id: number; message_uuid: string } | undefined
+    if (last) {
+      if (last.user_id !== user.id) {
+        throw new AppError(403, 'pc_session_forbidden', 'Computer Use is blocked during a teammate turn.')
+      }
+      if (q.isAutopilotMsg.get(last.message_uuid)) {
+        throw new AppError(403, 'pc_session_forbidden', 'Computer Use is blocked during Autopilot turns.')
+      }
+    }
   }
 
   function resolveDevice(userId: number, selector?: string | number | null): PcDeviceRow {
@@ -239,6 +331,7 @@ export function pcService({
           port: row.port,
           enabled: row.enabled === 1,
           allowShell: row.allow_shell === 1,
+          allowedFolders: parseAllowedFolders(row.allowed_folders),
           isDefault: row.is_default === 1,
           createdAt: row.created_at,
           updatedAt: row.updated_at,
@@ -264,6 +357,7 @@ export function pcService({
     }))
 
     return {
+      globalPaused: isGlobalPaused(user.id),
       tailnet: {
         connected: tsRunning,
         backendState: ts.backendState,
@@ -281,6 +375,7 @@ export function pcService({
             port: primary.port,
             enabled: primary.enabled,
             allowShell: primary.allowShell,
+            allowedFolders: primary.allowedFolders,
             isDefault: primary.isDefault,
             createdAt: primary.createdAt,
             updatedAt: primary.updatedAt,
@@ -303,7 +398,7 @@ export function pcService({
     const ip = input.tailscaleIp.trim()
     const platform: DevicePlatform = input.platform === 'android' ? 'android' : 'windows'
     const port = input.port ?? (platform === 'android' ? DEFAULT_ANDROID_PORT : DEFAULT_PC_PORT)
-    const allowShell = input.allowShell !== false
+    const allowShell = input.allowShell === true
     if (!name) throw new AppError(400, 'bad_args', 'Enter a name for your device.')
     if (!isTailscaleIp(ip)) throw new AppError(400, 'bad_args', 'Choose a valid Tailscale IPv4 address (100.64.0.0/10).')
     if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new AppError(400, 'bad_args', 'Port must be between 1024 and 65535.')
@@ -318,12 +413,42 @@ export function pcService({
 
   async function updateSettings(
     user: User,
-    patch: { deviceId?: number; enabled?: boolean; allowShell?: boolean; rotateToken?: boolean; setDefault?: boolean },
+    patch: {
+      deviceId?: number
+      enabled?: boolean
+      allowShell?: boolean
+      allowedFolders?: string[]
+      globalPaused?: boolean
+      rotateToken?: boolean
+      setDefault?: boolean
+    },
   ) {
+    if (patch.globalPaused !== undefined) {
+      q.setMemberPaused.run(user.id, patch.globalPaused ? 1 : 0)
+      if (
+        patch.deviceId === undefined &&
+        patch.enabled === undefined &&
+        patch.allowShell === undefined &&
+        patch.allowedFolders === undefined &&
+        !patch.rotateToken &&
+        !patch.setDefault
+      ) {
+        return status(user)
+      }
+    }
     const row = resolveDevice(user.id, patch.deviceId)
     const enabled = patch.enabled !== undefined ? (patch.enabled ? 1 : 0) : row.enabled
     const allowShell = patch.allowShell !== undefined ? (patch.allowShell ? 1 : 0) : row.allow_shell
-    q.updateSettings.run(enabled, allowShell, user.id, row.id)
+    let allowedFoldersJson = row.allowed_folders
+    if (patch.allowedFolders !== undefined) {
+      const cleaned = Array.from(new Set(
+        patch.allowedFolders
+          .map((f) => f.trim())
+          .filter((f) => f.length > 0 && normalizeFolderPath(f, row.platform).length > 0),
+      )).slice(0, 32)
+      allowedFoldersJson = JSON.stringify(cleaned)
+    }
+    q.updateSettings.run(enabled, allowShell, allowedFoldersJson, user.id, row.id)
     if (patch.rotateToken) {
       q.rotateToken.run(seal(masterKey, Buffer.from(newToken(), 'utf8'), `pc:${user.id}`), user.id, row.id)
     }
@@ -387,6 +512,7 @@ export function pcService({
       const rows = q.devices.all(user.id) as PcDeviceRow[]
       return {
         ok: true,
+        globalPaused: isGlobalPaused(user.id),
         tailnetConnected: ts.running && ts.backendState === 'Running',
         devices: rows.map((r) => {
           const peer = ts.devices.find((d) => d.ip === r.tailscale_ip)
@@ -405,6 +531,9 @@ export function pcService({
       }
     }
 
+    if (source === 'mcp' && isGlobalPaused(user.id)) {
+      throw new AppError(403, 'pc_paused', 'Computer Use is paused in DevDash. Resume it in My Devices to allow device tools.')
+    }
     const { device: deviceSelector, deviceId, ...forwardArgs } = args
     const row = resolveDevice(user.id, (deviceId ?? deviceSelector) as string | number | undefined)
     if (row.enabled !== 1) {
@@ -412,6 +541,19 @@ export function pcService({
     }
     if (tool === 'pc_run_powershell' && row.allow_shell !== 1) {
       throw new AppError(403, 'pc_shell_disabled', `Shell access is turned off for ${row.name} in My Devices settings.`)
+    }
+    if (tool === 'pc_fs') {
+      const allowed = parseAllowedFolders(row.allowed_folders)
+      if (!allowed.length) {
+        throw new AppError(403, 'pc_fs_no_folders', `No allowed folders are configured for ${row.name}. Add folders in My Devices before using file tools.`)
+      }
+      const targetPath = typeof forwardArgs.path === 'string' ? forwardArgs.path : ''
+      if (!isPathAllowed(targetPath, allowed, row.platform)) {
+        throw new AppError(403, 'pc_fs_forbidden', `Path "${targetPath}" is outside the folders you allowed for ${row.name}.`)
+      }
+      if (typeof forwardArgs.destPath === 'string' && forwardArgs.destPath && !isPathAllowed(forwardArgs.destPath, allowed, row.platform)) {
+        throw new AppError(403, 'pc_fs_forbidden', `Destination "${forwardArgs.destPath}" is outside the folders you allowed for ${row.name}.`)
+      }
     }
 
     const started = Date.now()
@@ -488,11 +630,11 @@ export function pcService({
           throw new AppError(400, 'unknown_tool', `Unknown device tool: ${tool}`)
       }
       q.addAudit.run(user.id, row.id, source, tool, summary, 1, Date.now() - started)
-      q.pruneAudit.run(user.id, user.id)
+      q.pruneAudit.run(user.id, AUDIT_RETENTION_SECONDS)
       return result
     } catch (err) {
       q.addAudit.run(user.id, row.id, source, tool, `${summary} — ${err instanceof Error ? err.message : 'failed'}`.slice(0, 240), 0, Date.now() - started)
-      q.pruneAudit.run(user.id, user.id)
+      q.pruneAudit.run(user.id, AUDIT_RETENTION_SECONDS)
       throw err
     }
   }
@@ -526,7 +668,9 @@ export function pcService({
     agents.onRpc('mcp.pc_tool', async (username, params) => {
       const user = q.userByName.get(username) as User | undefined
       if (!user) throw new AppError(403, 'forbidden', 'Unknown member.')
-      const p = (params ?? {}) as { tool?: unknown; args?: unknown }
+      const p = (params ?? {}) as { tool?: unknown; args?: unknown; sessionId?: unknown }
+      const sessionId = typeof p.sessionId === 'string' ? p.sessionId.trim() : undefined
+      assertPersonalSession(user, sessionId)
       const tool = typeof p.tool === 'string' ? p.tool.trim() : ''
       const args = p.args && typeof p.args === 'object' && !Array.isArray(p.args) ? (p.args as Record<string, unknown>) : {}
       if (!tool) throw new AppError(400, 'bad_args', 'Missing device tool name.')
