@@ -61,6 +61,7 @@ const BROWSER_PROFILE_DIR = '/home/neko/.devdash-chromium'
 const BROWSER_CHROMIUM_CONF = '/etc/devdash/browser-chromium.conf'
 const BROWSER_CDP_PROXY = '/etc/devdash/browser-cdp-proxy.py'
 const BROWSER_POLICIES = '/etc/devdash/browser-policies.json'
+const BROWSER_CDP_DIR = '/run/devdash/browser-cdp'
 // Neko's image ships DeveloperToolsAvailability: 2, which blocks CDP page attachment with "Not allowed".
 // Keep all of Neko's sandbox policies intact and set DeveloperToolsAvailability: 0 so loopback CDP works
 // on regular pages while force-installed extensions remain protected.
@@ -87,7 +88,7 @@ const BROWSER_POLICIES_TEXT = JSON.stringify({
   BrowserLabsEnabled: false,
   CommandLineFlagSecurityWarningsEnabled: false,
   URLAllowlist: ['file:///home/neko/Downloads'],
-  URLBlocklist: ['file://*', 'chrome://policy'],
+  URLBlocklist: ['file://*', 'chrome://policy', 'http://169.254.169.254/*', 'https://169.254.169.254/*', 'http://metadata.google.internal/*', 'https://metadata.google.internal/*'],
   ExtensionInstallForcelist: [
     'ddkjiahejlhfcafbddmgiahcphecmpfh;https://clients2.google.com/service/update2/crx',
     'mnjggcdmjocbbbhaepdhchncahnbgone;https://clients2.google.com/service/update2/crx',
@@ -160,10 +161,94 @@ stdout_logfile_backups=2
 redirect_stderr=true
 `
 const BROWSER_CDP_PROXY_TEXT = String.raw`#!/usr/bin/env python3
-import hmac, os, socket, threading
+import hmac, json, os, re, socket, struct, threading
 
-TOKEN = os.environ.get("NEKO_SESSION_API_TOKEN", "")
+TOKEN = os.environ.get("DEVDASH_CDP_TOKEN", "")
+SOCK_PATH = "/run/devdash-cdp/cdp.sock"
 MAX_HDR = 16384
+MAX_WS_PAYLOAD = 8 * 1024 * 1024
+
+ALLOWED_CDP_METHODS = frozenset({
+    "Page.enable",
+    "Page.bringToFront",
+    "Page.navigate",
+    "Page.captureScreenshot",
+    "Runtime.evaluate",
+    "Input.dispatchMouseEvent",
+    "Input.dispatchKeyEvent",
+    "Input.insertText",
+})
+
+TARGET_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+def allowed_http_target(method, path):
+    if method == "GET" and path in ("/json/version", "/json/list", "/json"):
+        return "http"
+    if method == "PUT" and path.startswith("/json/new?"):
+        return "http"
+    if method == "GET" and path.startswith("/json/close/"):
+        tid = path[len("/json/close/"):]
+        return "http" if TARGET_ID_RE.match(tid) else None
+    if method == "GET" and path.startswith("/devtools/page/"):
+        tid = path[len("/devtools/page/"):]
+        return "ws" if TARGET_ID_RE.match(tid) else None
+    return None
+
+def recv_exact(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf.extend(chunk)
+    return bytes(buf)
+
+def read_ws_frame(sock):
+    hdr = recv_exact(sock, 2)
+    if not hdr:
+        return None
+    b1, b2 = hdr[0], hdr[1]
+    fin = (b1 & 0x80) != 0
+    opcode = b1 & 0x0F
+    masked = (b2 & 0x80) != 0
+    length = b2 & 0x7F
+    if length == 126:
+        ext = recv_exact(sock, 2)
+        if not ext:
+            return None
+        length = struct.unpack("!H", ext)[0]
+    elif length == 127:
+        ext = recv_exact(sock, 8)
+        if not ext:
+            return None
+        length = struct.unpack("!Q", ext)[0]
+    if length > MAX_WS_PAYLOAD:
+        raise OSError("frame too large")
+    mask_key = recv_exact(sock, 4) if masked else None
+    if masked and not mask_key:
+        return None
+    payload = recv_exact(sock, length) if length else b""
+    if payload is None:
+        return None
+    if masked:
+        payload = bytes(payload[i] ^ mask_key[i & 3] for i in range(length))
+    return (fin, opcode, payload)
+
+def encode_ws_frame(opcode, payload, mask=False):
+    b1 = 0x80 | (opcode & 0x0F)
+    n = len(payload)
+    mask_bit = 0x80 if mask else 0x00
+    if n < 126:
+        header = bytes([b1, mask_bit | n])
+    elif n < 65536:
+        header = struct.pack("!BBH", b1, mask_bit | 126, n)
+    else:
+        header = struct.pack("!BBQ", b1, mask_bit | 127, n)
+    if mask:
+        key = os.urandom(4)
+        masked = bytes(payload[i] ^ key[i & 3] for i in range(n))
+        return header + key + masked
+    return header + payload
 
 def pipe(src, dst):
     try:
@@ -177,6 +262,75 @@ def pipe(src, dst):
     finally:
         try:
             dst.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+def filter_client_ws(client, upstream, client_lock):
+    frag_opcode = None
+    frag_buf = bytearray()
+    try:
+        while True:
+            frame = read_ws_frame(client)
+            if frame is None:
+                break
+            fin, opcode, payload = frame
+            if opcode in (0x8, 0x9, 0xA):
+                upstream.sendall(encode_ws_frame(opcode, payload, mask=True))
+                if opcode == 0x8:
+                    break
+                continue
+            if opcode == 0x0:
+                if frag_opcode is None:
+                    break
+                frag_buf.extend(payload)
+                if len(frag_buf) > MAX_WS_PAYLOAD:
+                    break
+                if not fin:
+                    continue
+                opcode, payload = frag_opcode, bytes(frag_buf)
+                frag_opcode = None
+                frag_buf.clear()
+            elif not fin:
+                frag_opcode = opcode
+                frag_buf = bytearray(payload)
+                continue
+            if opcode != 0x1:
+                continue
+            try:
+                msg = json.loads(payload.decode("utf-8"))
+            except Exception:
+                continue
+            method = msg.get("method") if isinstance(msg, dict) else None
+            if not isinstance(method, str) or method not in ALLOWED_CDP_METHODS:
+                err = json.dumps({
+                    "id": msg.get("id") if isinstance(msg, dict) else None,
+                    "error": {"code": -32601, "message": "CDP method not allowed"},
+                }).encode("utf-8")
+                with client_lock:
+                    client.sendall(encode_ws_frame(0x1, err, mask=False))
+                continue
+            upstream.sendall(encode_ws_frame(0x1, payload, mask=True))
+    except OSError:
+        pass
+    finally:
+        try:
+            upstream.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+def pipe_upstream_ws(upstream, client, client_lock):
+    try:
+        while True:
+            data = upstream.recv(65536)
+            if not data:
+                break
+            with client_lock:
+                client.sendall(data)
+    except OSError:
+        pass
+    finally:
+        try:
+            client.shutdown(socket.SHUT_WR)
         except OSError:
             pass
 
@@ -197,9 +351,12 @@ def handle(client):
         head = buf[:sep].decode("latin1")
         rest = buf[sep + 4:]
         lines = head.split("\r\n")
-        if not lines or " " not in lines[0]:
+        parts = lines[0].split(" ") if lines else []
+        if len(parts) < 2:
             client.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return
+        req_method, req_path = parts[0], parts[1]
+        kind = allowed_http_target(req_method, req_path)
         got = ""
         out = [lines[0]]
         for line in lines[1:]:
@@ -216,16 +373,41 @@ def handle(client):
         if not TOKEN or not hmac.compare_digest(got, TOKEN):
             client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return
+        if kind is None:
+            client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
         out.append("Host: 127.0.0.1:9222")
         payload = ("\r\n".join(out) + "\r\n\r\n").encode("latin1") + rest
         upstream = socket.create_connection(("127.0.0.1", 9222), timeout=5.0)
         upstream.sendall(payload)
-        client.settimeout(None)
-        upstream.settimeout(None)
-        t = threading.Thread(target=pipe, args=(upstream, client), daemon=True)
-        t.start()
-        pipe(client, upstream)
-        t.join(timeout=2.0)
+        if kind == "ws":
+            # Forward HTTP 101 handshake reply before switching to filtered WebSocket frames.
+            resp = b""
+            while b"\r\n\r\n" not in resp and len(resp) < MAX_HDR:
+                chunk = upstream.recv(4096)
+                if not chunk:
+                    return
+                resp += chunk
+            rsep = resp.find(b"\r\n\r\n")
+            if rsep < 0:
+                return
+            client.sendall(resp)
+            if not resp[:rsep].startswith(b"HTTP/1.1 101"):
+                return
+            client.settimeout(None)
+            upstream.settimeout(None)
+            lock = threading.Lock()
+            t = threading.Thread(target=pipe_upstream_ws, args=(upstream, client, lock), daemon=True)
+            t.start()
+            filter_client_ws(client, upstream, lock)
+            t.join(timeout=2.0)
+        else:
+            client.settimeout(None)
+            upstream.settimeout(None)
+            t = threading.Thread(target=pipe, args=(upstream, client), daemon=True)
+            t.start()
+            pipe(client, upstream)
+            t.join(timeout=2.0)
     except OSError:
         pass
     finally:
@@ -239,9 +421,13 @@ def handle(client):
             except OSError:
                 pass
 
-srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-srv.bind(("0.0.0.0", 9223))
+try:
+    os.unlink(SOCK_PATH)
+except FileNotFoundError:
+    pass
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(SOCK_PATH)
+os.chmod(SOCK_PATH, 0o666)
 srv.listen(64)
 while True:
     c, _ = srv.accept()
@@ -377,7 +563,7 @@ const commands = {
     if (state === 'false') { run('docker', ['start', BROWSER]); return {} }
     // Secrets DevDash uses to sign people in (members: full control; guests: watch only) and to ask who's watching.
     const env = existsSync(BROWSER_ENV) ? readFileSync(BROWSER_ENV, 'utf8') : ''
-    const missing = ['NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD', 'NEKO_MEMBER_MULTIUSER_USER_PASSWORD', 'NEKO_SESSION_API_TOKEN']
+    const missing = ['NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD', 'NEKO_MEMBER_MULTIUSER_USER_PASSWORD', 'NEKO_SESSION_API_TOKEN', 'DEVDASH_CDP_TOKEN']
       .filter((k) => !new RegExp(`^${k}=`, 'm').test(env))
     if (missing.length) {
       writeFileSync(BROWSER_ENV, env + missing.map((k) => `${k}=${randomBytes(32).toString('base64url')}\n`).join(''), { mode: 0o640 })
@@ -388,12 +574,13 @@ const commands = {
     // Chromium refuses a profile whose lock names another "computer": every new container used to be one. Same
     // hostname each time, and stale locks cleared (logins and cookies are untouched).
     run('docker', ['run', '--rm', '--entrypoint', 'sh', '-v', 'devdash-browser-profile:/p', image, '-c', 'rm -f /p/Singleton*'], { allowFail: true })
+    run('install', ['-d', '-m', '0750', '-o', 'root', '-g', 'devdash', BROWSER_CDP_DIR])
     writeFileSync(BROWSER_CHROMIUM_CONF, BROWSER_CHROMIUM_CONF_TEXT, { mode: 0o644 })
     writeFileSync(BROWSER_CDP_PROXY, BROWSER_CDP_PROXY_TEXT, { mode: 0o755 })
     writeFileSync(BROWSER_POLICIES, BROWSER_POLICIES_TEXT, { mode: 0o644 })
     run('docker', ['run', '-d', '--name', BROWSER, '--hostname', 'devdash-browser', '--restart', 'no',
       '--cpu-shares=512', '--shm-size=512m', '--memory=2048m', '--memory-swap=2560m',
-      '-p', '127.0.0.1:8090:8080', '-p', '127.0.0.1:9222:9223', '-p', '59000:59000/udp', '-p', '59001:59001/tcp',
+      '-p', '127.0.0.1:8090:8080', '-p', '59000:59000/udp', '-p', '59001:59001/tcp',
       '--health-cmd', 'wget -q -O /dev/null http://127.0.0.1:8080/browser/health', '--health-interval=60s',
       '--env-file', BROWSER_ENV,
       '-e', 'NEKO_SERVER_BIND=:8080', '-e', 'NEKO_SERVER_PATH_PREFIX=/browser/',
@@ -405,8 +592,10 @@ const commands = {
       '-v', `devdash-browser-profile:${BROWSER_PROFILE_DIR}`,
       '-v', `${BROWSER_CHROMIUM_CONF}:/etc/neko/supervisord/chromium.conf:ro`,
       '-v', `${BROWSER_CDP_PROXY}:/etc/neko/devdash-cdp-proxy.py:ro`,
+      '-v', `${BROWSER_CDP_DIR}:/run/devdash-cdp`,
       '-v', `${BROWSER_POLICIES}:/etc/chromium/policies/managed/policies.json:ro`,
       image])
+    browserEgressRules('add')
     return {}
   },
 
@@ -446,6 +635,7 @@ const commands = {
   },
 
   'browser-stop'() {
+    browserEgressRules('remove')
     run('docker', ['stop', '--time', '15', BROWSER], { allowFail: true }) // let Chromium close cleanly (no "restore pages?")
     run('docker', ['rm', '-f', BROWSER], { allowFail: true }) // the profile volume stays: logins survive
     // Releases an update replaced are unused now: only the newest stays (and the original 3.1, which the README's
@@ -703,6 +893,24 @@ function portOpen(port) {
     sock.once('connect', () => done(true))
     sock.once('error', () => done(false))
   })
+}
+
+/** Block egress from the shared browser container to private/metadata/CGNAT ranges (DNS-rebinding & redirect defense). */
+function browserEgressRules(action) {
+  if (DRY) return
+  const cip = run('docker', ['inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', BROWSER], { allowFail: true })
+  if (!cip || !/^\d+\.\d+\.\d+\.\d+$/.test(cip)) return
+  const blockedCidrs = ['169.254.0.0/16', '100.64.0.0/10', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']
+  for (const cidr of blockedCidrs) {
+    const rule = ['-s', `${cip}/32`, '-d', cidr, '-m', 'conntrack', '--ctstate', 'NEW', '-j', 'REJECT', '--reject-with', 'icmp-admin-prohibited']
+    if (action === 'add') {
+      if (run('iptables', ['-C', 'DOCKER-USER', ...rule], { allowFail: true }) === null) {
+        run('iptables', ['-I', 'DOCKER-USER', '1', ...rule], { allowFail: true })
+      }
+    } else {
+      run('iptables', ['-D', 'DOCKER-USER', ...rule], { allowFail: true })
+    }
+  }
 }
 
 async function waitPort(port, timeoutMs) {

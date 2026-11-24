@@ -210,9 +210,13 @@ test('embedded browser CDP proxy compiles cleanly and Chromium policies preserve
   }
   assert.match(pyMatch[1], /hmac\.compare_digest/, 'CDP proxy uses constant-time token compare')
   assert.match(pyMatch[1], /x-devdash-cdp-token/, 'CDP proxy requires X-DevDash-CDP-Token')
+  assert.match(pyMatch[1], /DEVDASH_CDP_TOKEN/, 'CDP proxy uses dedicated DEVDASH_CDP_TOKEN (not Neko token)')
+  assert.match(pyMatch[1], /AF_UNIX/, 'CDP proxy binds a Unix domain socket instead of TCP')
+  assert.match(pyMatch[1], /ALLOWED_CDP_METHODS/, 'CDP proxy enforces a strict WebSocket method allowlist')
+  assert.ok(!src.includes('127.0.0.1:9222:9223'), 'docker run must not expose CDP over TCP')
 
   assert.match(src, /DeveloperToolsAvailability:\s*0/, 'policy enables CDP on regular pages while protecting force-installed extensions')
-  assert.match(src, /URLBlocklist:\s*\['file:\/\/\*',\s*'chrome:\/\/policy'\]/, 'policy keeps file:// blocklist')
+  assert.match(src, /URLBlocklist:\s*\['file:\/\/\*',\s*'chrome:\/\/policy'/, 'policy keeps file:// blocklist')
   assert.match(src, /DownloadRestrictions:\s*3/, 'policy keeps download restrictions')
   assert.match(src, /AllowFileSelectionDialogs:\s*false/, 'policy keeps file dialog restriction')
 })

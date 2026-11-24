@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { WebSocketServer } from 'ws'
 import { computeObservationFingerprint, createCdpClient, formatObservation } from './cdp.ts'
@@ -181,5 +184,48 @@ test('CDP client sends X-DevDash-CDP-Token on HTTP and WebSocket, observes DOM, 
     cdp.close()
     wss.close()
     server.close()
+  }
+})
+
+test('CDP client speaks HTTP and WebSocket over a private Unix domain socket', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dd-cdp-unix-'))
+  const socketPath = join(dir, 'cdp.sock')
+  const token = 'dedicated-cdp-secret'
+  const server = createServer((req, res) => {
+    if (req.headers['x-devdash-cdp-token'] !== token) { res.writeHead(403); res.end(); return }
+    if (req.url === '/json/version') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ Browser: 'Chrome' })); return }
+    if (req.url === '/json/list') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify([{ id: 't1', type: 'page', title: 'Unix Tab', url: 'https://example.org/', webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/page/t1' }]))
+      return
+    }
+    res.writeHead(404); res.end()
+  })
+  const wss = new WebSocketServer({ noServer: true })
+  server.on('upgrade', (req, sock, head) => {
+    if (req.headers['x-devdash-cdp-token'] !== token) { sock.write('HTTP/1.1 403 Forbidden\r\n\r\n'); sock.destroy(); return }
+    wss.handleUpgrade(req, sock, head, (ws) => {
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(String(raw)) as { id: number; method: string }
+        if (msg.method === 'Runtime.evaluate') {
+          ws.send(JSON.stringify({ id: msg.id, result: { result: { value: { url: 'https://example.org/', title: 'Unix Tab', elements: [], text: 'Hello over unix', scroll: { y: 0, maxY: 0, height: 720 } } } } }))
+          return
+        }
+        ws.send(JSON.stringify({ id: msg.id, result: {} }))
+      })
+    })
+  })
+  await new Promise<void>((r) => server.listen(socketPath, r))
+  const cdp = createCdpClient({ socketPath, token: () => token })
+  try {
+    assert.equal(await cdp.available(), true)
+    const obs = await cdp.observe()
+    assert.equal(obs.title, 'Unix Tab')
+    assert.equal(obs.text, 'Hello over unix')
+  } finally {
+    cdp.close()
+    wss.close()
+    server.close()
+    rmSync(dir, { recursive: true, force: true })
   }
 })

@@ -61,8 +61,14 @@ export function browserService({ db, runDir, dataDir, masterKey, origin }: { db:
   const apiToken = () => {
     try { return readFileSync(ENV_FILE, 'utf8').match(/^NEKO_SESSION_API_TOKEN=(.+)$/m)?.[1] ?? '' } catch { return '' }
   }
+  const cdpToken = () => {
+    try { return readFileSync(ENV_FILE, 'utf8').match(/^DEVDASH_CDP_TOKEN=(.+)$/m)?.[1] ?? '' } catch { return '' }
+  }
 
-  const cdp = createCdpClient({ token: apiToken })
+  const cdp = createCdpClient({
+    ...(runDir ? { socketPath: join(runDir, 'browser-cdp', 'cdp.sock') } : {}),
+    token: cdpToken,
+  })
 
   async function start() {
     await helper('browser-start')

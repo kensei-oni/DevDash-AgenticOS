@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { request as httpRequest } from 'node:http'
 import { setTimeout as delay } from 'node:timers/promises'
 import WebSocket from 'ws'
 
@@ -352,9 +353,11 @@ const OBSERVE_SCRIPT = `(() => {
 
 /**
  * Thin native Chrome DevTools Protocol client for the shared Neko Chromium instance.
- * Speaks only to loopback (127.0.0.1:9222) using the private server token in X-DevDash-CDP-Token.
+ * Prefers the private Unix domain socket (/run/devdash/browser-cdp/cdp.sock) with a dedicated
+ * DEVDASH_CDP_TOKEN in X-DevDash-CDP-Token; supports baseUrl for local tests.
  */
-export function createCdpClient(opts: { baseUrl?: string; token: () => string }) {
+export function createCdpClient(opts: { socketPath?: string; baseUrl?: string; token: () => string }) {
+  const socketPath = opts.socketPath || undefined
   const baseUrl = (opts.baseUrl ?? 'http://127.0.0.1:9222').replace(/\/$/, '')
   let activeTargetId: string | null = null
 
@@ -363,15 +366,35 @@ export function createCdpClient(opts: { baseUrl?: string; token: () => string })
     return t ? { 'X-DevDash-CDP-Token': t } : {}
   }
 
-  async function fetchJson<T>(path: string, method: 'GET' | 'PUT' = 'GET', timeoutMs = 4000): Promise<T> {
+  async function rawHttp(path: string, method: 'GET' | 'PUT' = 'GET', timeoutMs = 4000): Promise<{ status: number; body: string }> {
+    if (socketPath) {
+      return new Promise((resolve, reject) => {
+        const req = httpRequest({ socketPath, path, method, headers: headers() }, (res) => {
+          let body = ''
+          res.setEncoding('utf8')
+          res.on('data', (chunk) => { body += chunk })
+          res.on('end', () => resolve({ status: res.statusCode ?? 500, body }))
+          res.on('error', reject)
+        })
+        const timer = setTimeout(() => { req.destroy(new Error(`CDP HTTP timeout on ${path}`)) }, timeoutMs)
+        req.on('close', () => clearTimeout(timer))
+        req.on('error', (err) => { clearTimeout(timer); reject(err) })
+        req.end()
+      })
+    }
     const r = await fetch(`${baseUrl}${path}`, {
       method,
       headers: headers(),
       redirect: 'error',
       signal: AbortSignal.timeout(timeoutMs),
     })
-    if (!r.ok) throw new Error(`CDP HTTP ${r.status} on ${path}`)
-    return await r.json() as T
+    return { status: r.status, body: await r.text() }
+  }
+
+  async function fetchJson<T>(path: string, method: 'GET' | 'PUT' = 'GET', timeoutMs = 4000): Promise<T> {
+    const r = await rawHttp(path, method, timeoutMs)
+    if (r.status < 200 || r.status >= 300) throw new Error(`CDP HTTP ${r.status} on ${path}`)
+    return JSON.parse(r.body) as T
   }
 
   async function rawTargets(): Promise<CdpTarget[]> {
@@ -381,6 +404,9 @@ export function createCdpClient(opts: { baseUrl?: string; token: () => string })
 
   function rewriteWsUrl(wsUrl: string): string {
     const parsed = new URL(wsUrl)
+    if (socketPath) {
+      return `ws+unix://${socketPath}:${parsed.pathname}${parsed.search}`
+    }
     const base = new URL(baseUrl)
     parsed.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:'
     parsed.hostname = base.hostname
@@ -573,12 +599,7 @@ export function createCdpClient(opts: { baseUrl?: string; token: () => string })
         const idx = action.index ?? pages.findIndex((p) => p.id === activeTargetId)
         const victim = pages[idx >= 0 ? idx : 0]
         if (!victim) throw new Error(`Tab ${action.index} does not exist.`)
-        await fetch(`${baseUrl}/json/close/${encodeURIComponent(victim.id)}`, {
-          method: 'GET',
-          headers: headers(),
-          redirect: 'error',
-          signal: AbortSignal.timeout(4000),
-        })
+        await rawHttp(`/json/close/${encodeURIComponent(victim.id)}`, 'GET', 4000)
         if (pooled?.targetId === victim.id) dropPool()
         if (activeTargetId === victim.id) {
           const remaining = pages.filter((p) => p.id !== victim.id)

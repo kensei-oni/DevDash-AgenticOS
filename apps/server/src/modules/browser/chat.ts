@@ -472,6 +472,32 @@ function resolveOpenUrl(raw: string, trustedUserTexts: string[]): URL {
   return u
 }
 
+/**
+ * Also resolve public DNS names to guard against DNS-rebinding / nip.io-style names that
+ * resolve to loopback, RFC1918, link-local metadata, or CGNAT addresses.
+ */
+export async function resolveOpenUrlStrict(
+  raw: string,
+  trustedUserTexts: string[],
+  lookupFn: (host: string) => Promise<{ address: string }[]> = (h) => dnsLookup(h, { all: true }),
+): Promise<URL> {
+  const u = resolveOpenUrl(raw, trustedUserTexts)
+  const requested = userRequestedUrls(trustedUserTexts)
+  if (requested.some((r) => r.origin === u.origin)) return u
+  if (!isPrivateHost(u.hostname)) {
+    try {
+      const addrs = await lookupFn(u.hostname)
+      if (addrs.some((a) => isPrivateHost(a.address))) {
+        throw new AppError(409, 'browser_url', 'Blocked a URL whose DNS resolves to a local or private IP address.')
+      }
+    } catch (err) {
+      if (err instanceof AppError) throw err
+      // Ignore NXDOMAIN / offline test resolvers; container egress firewall still enforces IP blocks at runtime.
+    }
+  }
+  return u
+}
+
 function safeParseJson<T>(raw: string, fallback: T): T {
   try { return JSON.parse(raw) as T } catch { return fallback }
 }
@@ -658,7 +684,7 @@ export function browserChat(
     signal: AbortSignal,
   ): Promise<CdpActionResult> {
     if (step.kind === 'open' || step.kind === 'navigate') {
-      const url = resolveOpenUrl(step.url, trustedTexts)
+      const url = await resolveOpenUrlStrict(step.url, trustedTexts)
       setStatus(`Opening ${url.hostname}…`)
       check()
       await browser.act({ kind: 'open', url: url.href })
@@ -925,7 +951,7 @@ export function browserChat(
           if (obs.mode === 'cdp' && browser.actCdp) {
             let cdpAction: CdpAction
             if (step.kind === 'open' || step.kind === 'navigate') {
-              const url = resolveOpenUrl(step.url, trustedUserTexts)
+              const url = await resolveOpenUrlStrict(step.url, trustedUserTexts)
               activeRun.status = `Opening ${url.hostname}…`
               cdpAction = { kind: 'navigate', url: url.href, newTab: step.newTab }
             } else if (step.kind === 'click') {
@@ -1011,7 +1037,7 @@ export function browserChat(
         // Post-action redirect SSRF guard in CDP mode
         if (obs.mode === 'cdp' && obs.url && /^https?:\/\//i.test(obs.url)) {
           try {
-            resolveOpenUrl(obs.url, trustedUserTexts)
+            await resolveOpenUrlStrict(obs.url, trustedUserTexts)
           } catch (err) {
             if (browser.actCdp) {
               await browser.actCdp({ kind: 'navigate', url: 'about:blank' }).catch(() => {})

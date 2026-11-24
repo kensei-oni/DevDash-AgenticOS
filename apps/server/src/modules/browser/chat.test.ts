@@ -6,7 +6,7 @@ import { AppError } from '../../core/http.ts'
 import type { User } from '../auth/repo.ts'
 import { authMiddleware } from '../auth/routes.ts'
 import type { AuthService } from '../auth/service.ts'
-import { browserChat, type BrowserAction, type BrowserChatModel } from './chat.ts'
+import { browserChat, type BrowserAction, type BrowserChatModel , resolveOpenUrlStrict } from './chat.ts'
 import { browserRoutes } from './routes.ts'
 import type { BrowserService } from './service.ts'
 import { clickPoint, screenLines, screenSnapshot, type Screen } from './screen.ts'
@@ -652,4 +652,17 @@ test('normalizes verbose thoughts, long wait budgets, bracketed refs, plan synon
   assert.deepEqual(actions[0], { kind: 'click', ref: 'e9', label: undefined, x: undefined, y: undefined })
   assert.deepEqual(actions[1], { kind: 'wait_for', selector: undefined, text: undefined, networkidle: undefined, ms: 15000 })
   assert.equal(chat.state(admin).run?.status, 'completed')
+})
+
+test('resolveOpenUrlStrict blocks DNS names resolving to private, loopback, metadata, or CGNAT IPs', async () => {
+  await assert.rejects(
+    resolveOpenUrlStrict('http://127.0.0.1.nip.io/admin', ['Check public site'], async () => [{ address: '127.0.0.1' }]),
+    /DNS resolves to a local or private IP/,
+  )
+  await assert.rejects(
+    resolveOpenUrlStrict('http://meta.evil.example/', ['Check public site'], async () => [{ address: '169.254.169.254' }]),
+    /DNS resolves to a local or private IP/,
+  )
+  const ok = await resolveOpenUrlStrict('https://public.example.com/', ['Check public site'], async () => [{ address: '93.184.216.34' }])
+  assert.equal(ok.hostname, 'public.example.com')
 })
