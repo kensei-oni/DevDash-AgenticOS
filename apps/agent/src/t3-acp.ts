@@ -308,7 +308,7 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
       let waits = 0
       let settled = false
       let cursor = afterPosition
-      let interval = 250
+      let interval = 120
       let previous = ''
       try {
         if (result.delivery === 'queued') {
@@ -347,7 +347,7 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
             cursor = Math.max(cursor, keep - 1)
           }
           const signature = JSON.stringify([run?.status, items.map((i) => [i.itemId, i.status, i.text, i.updatedAt])])
-          interval = signature === previous ? Math.min(interval * 2, 1000) : 250
+          interval = signature === previous ? Math.min(interval * 2, 1000) : 120
           previous = signature
           pollWake = new AbortController()
           await delay(Math.min(interval, Math.max(1, deadline - Date.now())), undefined, { signal: pollWake.signal }).catch((err: Error) => { if (err.name !== 'AbortError') throw err })

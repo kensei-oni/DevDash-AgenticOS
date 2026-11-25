@@ -150,10 +150,12 @@ const ops: Record<string, (r: Req) => Promise<unknown> | unknown> = {
   't3.disconnect': async () => harness.disconnectT3(),
   'claude.profiles': async (r) => {
     if (r.refresh === true) harness.refreshT3()
-    return {
-      profiles: (await claude.profiles()).map((p) => ({ ...p, memory: memory.enabled(p.name) })),
-      agents: await harness.agents().catch(() => []),
-    }
+    const [profiles, agents] = await Promise.all([
+      claude.profiles().then((list) => list.map((p) => ({ ...p, memory: memory.enabled(p.name) }))),
+      harness.agents().catch(() => []),
+    ])
+    if (agents.some((a) => a.harness === 't3code' && a.installed)) harness.warmT3()
+    return { profiles, agents }
   },
   'claude.memory': async (r) => (await memory.set(str(r.profile, 'profile'), r.enabled === true), { ok: true }),
   'claude.memory.health': async () => ({ health: await memory.health(claude.profileNames()) }),
@@ -351,3 +353,5 @@ startTeamFiles()
 void skills.syncProfiles().catch((err: Error) => console.error('skills:', err.message))
 // The member's tailnet node comes back after the server restarts (tailscale.ts resume), if they're connected.
 void tailscale.resume().catch((err: Error) => console.error('tailscale:', err.message))
+// Prewarm the member's T3 Code model picker in the background so opening a session never waits on cold discovery.
+harness.warmT3()

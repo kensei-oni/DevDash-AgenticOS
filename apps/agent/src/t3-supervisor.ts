@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto'
 import { once } from 'node:events'
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { notFound, PROTOCOL_VERSION, Rpc } from './acp.ts'
@@ -65,6 +65,10 @@ function killGroup(pid: number | undefined, sig: NodeJS.Signals) {
 }
 
 /** Validate a regular non-symlink member-owned credential/config file before copying into an ephemeral home. */
+export function isAntigravityCliBinary(binPath: string): boolean {
+  return /^(?:antigravity|agy)(?:\.exe)?$/i.test(basename(binPath))
+}
+
 export function assertMemberOwnedRegularFile(filePath: string, uid: number): void {
   const st = lstatSync(filePath)
   if (!st.isFile() || st.isSymbolicLink() || st.uid !== uid) {
@@ -316,6 +320,7 @@ type AntigravityWorker = {
   ended: AbortController
   stopped: Promise<void>
   disposed: boolean
+  sessionCloseMethod: 'session/close' | 'session/delete'
   idleTimer?: ReturnType<typeof setTimeout>
   hooks?: AntigravityCallHooks
   dispose: (force?: boolean) => Promise<void>
@@ -347,6 +352,7 @@ async function startAntigravityWorker(
   startupMs: number,
   idleMs: number,
 ): Promise<AntigravityWorker> {
+  const isCli = isAntigravityCliBinary(provider.bin)
   const runDir = mkdtempSync(join(tmpdir(), 'devdash-t3-agy-'))
   const workDir = join(runDir, 'work')
   const homeDir = join(runDir, 'home')
@@ -357,7 +363,7 @@ async function startAntigravityWorker(
     mkdirSync(workDir, { mode: 0o700 })
     mkdirSync(homeDir, { mode: 0o700 })
     mkdirSync(acpDir, { recursive: true, mode: 0o700 })
-    const tokenCopy = join(acpDir, 'acp_token.json')
+    const tokenCopy = join(acpDir, isCli ? 'antigravity-oauth-token' : 'acp_token.json')
     copyFileSync(provider.tokenPath, tokenCopy)
     chmodSync(tokenCopy, 0o600)
     const settingsCopy = join(acpDir, 'settings.json')
@@ -378,11 +384,18 @@ async function startAntigravityWorker(
     LANG: process.env.LANG || 'C.UTF-8',
     AGY_ACP_FORCE_FILE_STORAGE: '1',
     BROWSER: '/bin/false',
+    ...(isCli ? {
+      AGY_CLI_DISABLE_AUTO_UPDATE: 'true',
+      SSH_CONNECTION: '127.0.0.1 0 127.0.0.1 0',
+      ELECTRON_RUN_AS_NODE: '1',
+      PYTHONUNBUFFERED: '1',
+    } : {}),
     ...(provider.harnessPath ? { ANTIGRAVITY_HARNESS_PATH: provider.harnessPath } : {}),
     ...(sslCert ? { SSL_CERT_FILE: sslCert } : {}),
   }
 
-  const child = spawn(provider.bin, ['--uid='], {
+  const spawnArgs = isCli ? ['acp', '--gemini-dir', geminiHome, '--app-data-dir', 'antigravity-acp'] : ['--uid=']
+  const child = spawn(provider.bin, spawnArgs, {
     cwd: workDir,
     detached: true,
     stdio: ['pipe', 'pipe', 'ignore'],
@@ -396,7 +409,7 @@ async function startAntigravityWorker(
 
   let disposePromise: Promise<void> | undefined
   const worker: AntigravityWorker = {
-    key, slot, workDir, runDir, child, ended, stopped, disposed: false,
+    key, slot, workDir, runDir, child, ended, stopped, disposed: false, sessionCloseMethod: 'session/delete',
     rpc: undefined as unknown as Rpc,
     dispose: async (force = false) => {
       if (disposePromise) return disposePromise
@@ -472,10 +485,15 @@ async function startAntigravityWorker(
 
   const initSignal = AbortSignal.any([ended.signal, AbortSignal.timeout(startupMs)])
   try {
-    const init = await withSignal(worker.rpc.request<{ authMethods?: { id: string }[] }>('initialize', {
+    const init = await withSignal(worker.rpc.request<{
+      authMethods?: { id: string }[]
+      agentCapabilities?: { sessionCapabilities?: { close?: unknown } }
+    }>('initialize', {
       protocolVersion: PROTOCOL_VERSION,
+      ...(isCli ? { clientInfo: { name: 't3-code', title: 'T3 Code', version: '0.1.12' } } : {}),
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
     }), initSignal)
+    if (init.agentCapabilities?.sessionCapabilities?.close) worker.sessionCloseMethod = 'session/close'
     if (Array.isArray(init.authMethods) && init.authMethods.length > 0) {
       if (!init.authMethods.some((a) => a.id === provider.authMethod)) {
         throw new Error('The T3 Antigravity supervisor does not support the verified member auth method.')
@@ -591,7 +609,7 @@ async function withAntigravity<T>(
         await w.dispose(true)
       } else {
         if (sessionId) {
-          await Promise.race([w.rpc.request('session/delete', { sessionId }).catch(() => {}), delay(500)])
+          await Promise.race([w.rpc.request(w.sessionCloseMethod, { sessionId }).catch(() => {}), delay(500)])
         }
         if (w.rpc.closed || w.ended.signal.aborted) await w.dispose(true)
         else w.touch(idleMs)

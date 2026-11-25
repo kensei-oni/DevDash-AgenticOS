@@ -26,7 +26,7 @@ import { projectsQuery, type SessionSharing } from '../work/data'
 import { useArchiveSession } from './ArchiveSession'
 import { ModelField, ThinkingLevelField } from './ModelChoices'
 import { effortLevels, type ModelInfo } from './models'
-import { byFolder, FALLBACK_MODELS, PERMISSION_MODES, profilesQuery, relativeTime, sessionPlace, sessionsQuery, useOfferedModels, type PermissionMode, type Session } from './data'
+import { byFolder, commandsQuery, FALLBACK_MODELS, PERMISSION_MODES, profilesQuery, relativeTime, sessionPlace, sessionsQuery, useOfferedModels, type PermissionMode, type Session } from './data'
 import { HARNESS, HARNESSES, harnessOf, type Harness } from './harness'
 
 export function SessionsPage() {
@@ -169,8 +169,17 @@ export function NewSession({ open, onClose, initialPrompt = '', initialCwd, init
 }) {
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const setup = useQuery({ ...profilesQuery, enabled: open })
+  const setup = useQuery(profilesQuery)
   const d = setup.data?.defaults
+  useEffect(() => {
+    if (!setup.data) return
+    if (d) void qc.prefetchQuery(commandsQuery(d.profile, harnessOf(d)))
+    const t3 = (setup.data.agents as { harness: string; installed: boolean; profiles: { name: string; providers: string[] }[] }[] | undefined)
+      ?.find((a) => a.harness === 't3code')
+    if (t3?.installed && t3.profiles.some((p) => p.providers.length)) {
+      void qc.prefetchQuery(commandsQuery('default', 't3code'))
+    }
+  }, [setup.data, d, qc])
   const [prompt, setPrompt] = useState(initialPrompt)
   const [cwd, setCwd] = useState(initialCwd ?? sessionFolder)
   const [customModel, setCustomModel] = useState(false)

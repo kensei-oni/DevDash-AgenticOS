@@ -1046,3 +1046,100 @@ test('T3 refresh starts a new discovery probe and a stale result cannot replace 
     T3.invalidateInfo()
   }
 })
+
+test('T3 Antigravity CLI 1.5+ uses antigravity-oauth-token, session/close and persists member-owned capabilities cache', async () => {
+  const original = readFileSync(config, 'utf8')
+  const folder = mkdtempSync(join(home, 'supervisor-agy-cli-'))
+  const capture = join(folder, 'acp-cli-events.jsonl')
+  const releaseId = 'b'.repeat(64)
+  const toolRoot = join(folder, 'tools', 'antigravity-acp', `${process.platform}-${process.arch}`)
+  const versionDir = join(toolRoot, 'versions', releaseId)
+  mkdirSync(versionDir, { recursive: true })
+  writeFileSync(join(toolRoot, 'active.json'), JSON.stringify({ releaseId }), { mode: 0o600 })
+  writeFileSync(join(versionDir, '.install-complete.json'), JSON.stringify({
+    releaseId, version: '1.5.17', executable: { name: 'antigravity', bytes: 123 },
+  }), { mode: 0o400 })
+  const binary = join(versionDir, 'antigravity')
+  writeFileSync(binary, `#!${process.execPath}
+const { appendFileSync, existsSync, readdirSync } = require('node:fs')
+const { join } = require('node:path')
+const { createInterface } = require('node:readline')
+const capture = ${JSON.stringify(capture)}
+const log = (entry) => appendFileSync(capture, JSON.stringify(entry) + '\\n')
+const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\\n')
+let model = 'gemini-4-neon', level = 'high'
+const configOptions = () => [
+  { id: 'model', category: 'model', currentValue: model, options: [{ value: 'gemini-4-neon', name: 'Gemini 4 Neon' }] },
+  { id: 'thinking_level', category: 'thought_level', currentValue: level, options: [{ value: 'low', name: 'Low' }, { value: 'high', name: 'High' }] },
+]
+createInterface({ input: process.stdin }).on('line', (line) => {
+  if (!line.trim()) return
+  const msg = JSON.parse(line)
+  if (msg.method === 'initialize') {
+    const idx = process.argv.indexOf('--gemini-dir')
+    const gdir = idx >= 0 ? process.argv[idx + 1] : ''
+    const acpDir = join(gdir, 'antigravity-acp')
+    log({ event: 'initialize', argv: process.argv.slice(2), clientInfo: msg.params.clientInfo, acpFiles: existsSync(acpDir) ? readdirSync(acpDir).sort() : [] })
+    send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { close: {} } }, authMethods: [{ id: 'oauth-personal' }] } })
+  } else if (msg.method === 'authenticate') {
+    send({ jsonrpc: '2.0', id: msg.id, result: {} })
+  } else if (msg.method === 'session/new') {
+    send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'cli-ephemeral', configOptions: configOptions() } })
+  } else if (msg.method === 'session/set_config_option') {
+    if (msg.params.configId === 'thinking_level') level = msg.params.value
+    send({ jsonrpc: '2.0', id: msg.id, result: { configOptions: configOptions() } })
+  } else if (msg.method === 'session/prompt') {
+    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'cli-ephemeral', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'cli-agy-ok' } } } })
+    send({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn' } })
+  } else if (msg.method === 'session/close') {
+    log({ event: 'session/close', params: msg.params })
+    send({ jsonrpc: '2.0', id: msg.id, result: {} })
+  }
+})
+`, { mode: 0o555 })
+
+  const hash = createHash('sha256').update('antigravity').digest('hex')
+  const acpDir = join(folder, 'userdata', 'providers', 'antigravity', hash, 'antigravity-acp')
+  mkdirSync(acpDir, { recursive: true, mode: 0o700 })
+  writeFileSync(join(acpDir, 'antigravity-oauth-token'), JSON.stringify({ access_token: 'tok', auth_method: 'consumer' }), { mode: 0o600 })
+  writeFileSync(join(acpDir, 'settings.json'), JSON.stringify({ auth: { type: 'oauth-personal' } }), { mode: 0o600 })
+  writeFileSync(join(folder, 'userdata', 'settings.json'), JSON.stringify({
+    providerInstances: {
+      antigravity: { driver: 'antigravity', enabled: true, config: { enabled: true, authMethod: 'oauth-personal' } },
+    },
+  }), { mode: 0o600 })
+  supervisorProviders = [
+    { providerInstanceId: 'antigravity', driverKind: 'antigravity', canRunChildTask: true, displayName: 'Antigravity', models: [
+      { id: 'gemini-4-neon', label: 'Gemini 4 Neon', options: [{ id: 'thinkingLevel', values: ['low', 'high'] }] },
+    ] },
+  ]
+  writeFileSync(config, JSON.stringify({ ...JSON.parse(original), baseDir: folder }))
+
+  try {
+    H.refreshT3()
+    const { models: chatModels } = await H.commandsAndModels('t3code', 'default')
+    assert.ok(chatModels.some((m) => m.value === 'antigravity/gemini-4-neon'))
+    const diskCache = join(home, '.cache', 'devdash', 't3-capabilities-cache.json')
+    assert.equal(existsSync(diskCache), true)
+    assert.equal(statSync(diskCache).mode & 0o777, 0o600)
+
+    const { models: supModels } = await H.commandsAndModels('t3code', 'default', undefined, true)
+    assert.deepEqual(supModels.filter((m) => m.supportsSupervisor).map((m) => m.value), ['antigravity/gemini-4-neon'])
+    assert.equal(await H.complete('t3code', 'default', 'judge', { model: 'antigravity/gemini-4-neon', effort: 'low' }), 'cli-agy-ok')
+
+    const logged = readFileSync(capture, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>)
+    const init = logged.find((e) => e.event === 'initialize')!
+    assert.equal((init.argv as string[])[0], 'acp')
+    assert.equal((init.clientInfo as { name: string }).name, 't3-code')
+    assert.deepEqual(init.acpFiles, ['antigravity-oauth-token', 'settings.json'])
+    assert.ok(logged.some((e) => e.event === 'session/close'))
+
+    H.refreshT3()
+    assert.equal(existsSync(diskCache), false)
+  } finally {
+    supervisorProviders = undefined
+    writeFileSync(config, original)
+    H.refreshT3()
+    rmSync(folder, { recursive: true, force: true })
+  }
+})

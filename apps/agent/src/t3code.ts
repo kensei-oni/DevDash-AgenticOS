@@ -4,13 +4,14 @@ import { createServer } from 'node:net'
 import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { assertRegularMemberUid } from './t3-local.ts'
 import {
   assertMemberOwnedRegularFile,
   disposeSupervisorWorkers,
+  isAntigravityCliBinary,
   supervisorModels,
   validateAntigravitySettingsFile,
   type SupervisorModel,
@@ -44,6 +45,38 @@ export function configRevision(): string {
     const file = configPath()
     const st = statSync(file)
     return `${file}:${st.mtimeMs}:${st.size}`
+  } catch {
+    return ''
+  }
+}
+
+export function settingsRevision(): string {
+  const rev = configRevision()
+  if (!rev) return ''
+  try {
+    const { baseDir } = readConfig()
+    if (!baseDir) return rev
+    const st = statSync(join(baseDir, 'userdata', 'settings.json'))
+    return `${rev}|${st.mtimeMs}:${st.size}`
+  } catch {
+    return rev
+  }
+}
+
+export function cachesSignature(): string {
+  try {
+    const { baseDir } = readConfig()
+    if (!baseDir) return ''
+    const dir = join(baseDir, 'caches')
+    const files = readdirSync(dir).filter((f) => f.endsWith('.json') && !f.endsWith('-probe.json')).sort()
+    return files.map((f) => {
+      try {
+        const st = statSync(join(dir, f))
+        return `${f}:${st.mtimeMs}:${st.size}`
+      } catch {
+        return f
+      }
+    }).join(',')
   } catch {
     return ''
   }
@@ -88,15 +121,88 @@ export async function connectedCapabilities(client: T3Client, search?: string, o
   return { ...capabilities, providers: capabilities.providers.filter((p) => p.canRunChildTask === true) }
 }
 
-let fullCapsCache: { key: string; at: number; version: string | null; capabilities: Capabilities } | undefined
+const CAPS_FRESH_MS = 2 * 60_000
+const CAPS_STALE_MS = 60 * 60_000
+const fullCapsDiskCachePath = () => join(homedir(), '.cache', 'devdash', 't3-capabilities-cache.json')
 
-export async function inspect(budgetMs = 5000, search?: string, full = false) {
+type FullCapsEntry = {
+  key: string
+  diskKey: string
+  cachesSig: string
+  at: number
+  version: string | null
+  capabilities: Capabilities
+}
+let fullCapsCache: FullCapsEntry | undefined
+let fullCapsRefreshing: Promise<{ version: string | null; capabilities: Capabilities }> | undefined
+
+function isValidCapabilities(v: unknown): v is Capabilities {
+  if (!isPlainObject(v) || typeof v.runtimeMode !== 'string' || !Array.isArray(v.providers)) return false
+  return v.providers.every((p) =>
+    isPlainObject(p) && typeof p.providerInstanceId === 'string' && typeof p.canRunChildTask === 'boolean' && Array.isArray(p.models)
+    && p.models.every((m) => isPlainObject(m) && typeof m.id === 'string')
+  )
+}
+
+function readFullCapsDiskCache(expectedDiskKey: string): Omit<FullCapsEntry, 'key'> | undefined {
+  if (!expectedDiskKey) return undefined
+  try {
+    const uid = assertRegularMemberUid(process.getuid?.())
+    const file = fullCapsDiskCachePath()
+    const st = lstatSync(file)
+    if (!st.isFile() || st.isSymbolicLink() || st.uid !== uid || (st.mode & 0o077) !== 0) return undefined
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as {
+      diskKey?: string; cachesSig?: string; at?: number; version?: unknown; capabilities?: unknown
+    }
+    const now = Date.now()
+    if (parsed.diskKey !== expectedDiskKey || typeof parsed.at !== 'number' || parsed.at > now + 5_000 || now - parsed.at >= CAPS_STALE_MS) return undefined
+    if (parsed.version !== null && typeof parsed.version !== 'string') return undefined
+    if (!isValidCapabilities(parsed.capabilities)) return undefined
+    return {
+      diskKey: expectedDiskKey,
+      cachesSig: typeof parsed.cachesSig === 'string' ? parsed.cachesSig : '',
+      at: parsed.at,
+      version: parsed.version,
+      capabilities: parsed.capabilities,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function writeFullCapsDiskCache(entry: Omit<FullCapsEntry, 'key'>): void {
+  if (!entry.diskKey) return
+  try {
+    assertRegularMemberUid(process.getuid?.())
+    const file = fullCapsDiskCachePath()
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+    const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
+    try {
+      writeFileSync(tmp, JSON.stringify({
+        diskKey: entry.diskKey,
+        cachesSig: entry.cachesSig,
+        at: entry.at,
+        version: entry.version,
+        capabilities: entry.capabilities,
+      }), { mode: 0o600, flag: 'wx' })
+      renameSync(tmp, file)
+    } catch (err) {
+      try { unlinkSync(tmp) } catch { /* ignore */ }
+      throw err
+    }
+  } catch { /* best-effort cache */ }
+}
+
+function clearFullCapsDiskCache(): void {
+  try { unlinkSync(fullCapsDiskCachePath()) } catch { /* ignore */ }
+}
+
+async function fetchInspectLive(budgetMs: number, search: string | undefined, full: boolean) {
   const started = generation
   const rev = configRevision()
-  const cacheKey = `${started}:${rev}`
-  if (full && !search && fullCapsCache && fullCapsCache.key === cacheKey && Date.now() - fullCapsCache.at < 60_000) {
-    return { version: fullCapsCache.version, capabilities: fullCapsCache.capabilities }
-  }
+  const diskKey = settingsRevision()
+  const cachesSig = cachesSignature()
+  const cacheKey = `${started}:${diskKey}`
   const deadline = Date.now() + budgetMs
   const runOnce = async (entry: SharedClientEntry) => {
     const remaining = Math.max(1, deadline - Date.now())
@@ -125,10 +231,47 @@ export async function inspect(budgetMs = 5000, search?: string, full = false) {
     }
   }
   if (generation === started && !search) {
-    capsCache = { key: cacheKey, at: Date.now(), capabilities: result.capabilities }
-    if (full) fullCapsCache = { key: cacheKey, at: Date.now(), version: result.version, capabilities: result.capabilities }
+    const now = Date.now()
+    capsCache = { key: `${started}:${rev}`, at: now, capabilities: result.capabilities }
+    if (full) {
+      const next: FullCapsEntry = { key: cacheKey, diskKey, cachesSig, at: now, version: result.version, capabilities: result.capabilities }
+      fullCapsCache = next
+      writeFullCapsDiskCache(next)
+    }
   }
   return result
+}
+
+export async function inspect(budgetMs = 5000, search?: string, full = false) {
+  if (full && !search) {
+    const diskKey = settingsRevision()
+    const cacheKey = `${generation}:${diskKey}`
+    if (!fullCapsCache || fullCapsCache.key !== cacheKey) {
+      const disk = readFullCapsDiskCache(diskKey)
+      if (disk) fullCapsCache = { key: cacheKey, ...disk }
+    }
+    if (fullCapsCache && fullCapsCache.key === cacheKey) {
+      const age = Date.now() - fullCapsCache.at
+      if (age < CAPS_STALE_MS) {
+        const stale = age >= CAPS_FRESH_MS || fullCapsCache.cachesSig !== cachesSignature()
+        if (stale && !fullCapsRefreshing) {
+          const p = fetchInspectLive(budgetMs, undefined, true).finally(() => {
+            if (fullCapsRefreshing === p) fullCapsRefreshing = undefined
+          })
+          fullCapsRefreshing = p
+          void p.catch(() => {})
+        }
+        return { version: fullCapsCache.version, capabilities: fullCapsCache.capabilities }
+      }
+    }
+    if (fullCapsRefreshing) return fullCapsRefreshing
+    const p = fetchInspectLive(budgetMs, undefined, true).finally(() => {
+      if (fullCapsRefreshing === p) fullCapsRefreshing = undefined
+    })
+    fullCapsRefreshing = p
+    return p
+  }
+  return fetchInspectLive(budgetMs, search, full)
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -159,7 +302,26 @@ function resolveAntigravityBinary(baseDir: string, config: Record<string, unknow
       if (!isPlainObject(active)) return undefined
       const releaseId = active.releaseId
       if (typeof releaseId !== 'string' || !/^[a-f0-9]{16,128}$/i.test(releaseId)) return undefined
-      bin = join(toolRoot, 'versions', releaseId, 'agy_acp_server.par')
+      const versionDir = join(toolRoot, 'versions', releaseId)
+      const dirStat = lstatSync(versionDir)
+      if (!dirStat.isDirectory() || dirStat.isSymbolicLink() || dirStat.uid !== uid) return undefined
+      const recordPath = join(versionDir, '.install-complete.json')
+      if (existsSync(recordPath)) {
+        assertMemberOwnedRegularFile(recordPath, uid)
+        const record = JSON.parse(readFileSync(recordPath, 'utf8')) as unknown
+        if (!isPlainObject(record) || record.releaseId !== releaseId || !isPlainObject(record.executable)) return undefined
+        const execName = record.executable.name
+        if (execName !== 'antigravity' && execName !== 'agy_acp_server.par') return undefined
+        const candidate = join(versionDir, execName)
+        const binStat = lstatSync(candidate)
+        if (!binStat.isFile() || binStat.isSymbolicLink() || binStat.uid !== uid) return undefined
+        bin = candidate
+      } else {
+        const candidate = join(versionDir, 'agy_acp_server.par')
+        const binStat = lstatSync(candidate)
+        if (!binStat.isFile() || binStat.isSymbolicLink() || binStat.uid !== uid) return undefined
+        bin = candidate
+      }
     } catch {
       return undefined
     }
@@ -207,7 +369,7 @@ function supervisorProviders(providers: Capabilities['providers']): Map<string, 
         if (!resolved) continue
         const providerHash = createHash('sha256').update(p.providerInstanceId).digest('hex')
         const acpDir = join(baseDir, 'userdata', 'providers', 'antigravity', providerHash, 'antigravity-acp')
-        const tokenPath = join(acpDir, 'acp_token.json')
+        const tokenPath = join(acpDir, isAntigravityCliBinary(resolved.bin) ? 'antigravity-oauth-token' : 'acp_token.json')
         const agySettingsPath = join(acpDir, 'settings.json')
         try {
           assertMemberOwnedRegularFile(tokenPath, uid)
@@ -239,25 +401,40 @@ function supervisorProviders(providers: Capabilities['providers']): Map<string, 
 async function expandShortlists(client: T3Client, caps: Capabilities, options?: T3CallOptions) {
   const { baseDir } = readConfig()
   if (!baseDir) return
+  const groups: { provider: Capabilities['providers'][number]; ids: string[]; found: (Model | undefined)[] }[] = []
+  const queue: { groupIdx: number; itemIdx: number; providerInstanceId: string; id: string }[] = []
   for (const provider of caps.providers) {
     if (!provider.omittedModels || !/^[\w.-]+$/.test(provider.providerInstanceId)) continue
-    let ids: string[]
     try {
       const snapshot = JSON.parse(readFileSync(join(baseDir, 'caches', provider.providerInstanceId + '.json'), 'utf8'))
       if (snapshot.instanceId !== provider.providerInstanceId || snapshot.driver !== provider.driverKind) continue
-      ids = snapshot.models.map((m: { slug: string }) => m.slug).filter((id: string) => typeof id === 'string' && !provider.models.some((m) => m.id === id))
+      const ids = snapshot.models.map((m: { slug: string }) => m.slug).filter((id: string) => typeof id === 'string' && !provider.models.some((m) => m.id === id))
+      if (!ids.length) continue
+      const groupIdx = groups.length
+      groups.push({ provider, ids, found: new Array<Model | undefined>(ids.length) })
+      ids.forEach((id: string, itemIdx: number) => queue.push({ groupIdx, itemIdx, providerInstanceId: provider.providerInstanceId, id }))
     } catch { continue }
-    for (let i = 0; i < ids.length; i += 6) {
-      await Promise.allSettled(ids.slice(i, i + 6).map(async (id) => {
-        const exact = await connectedCapabilities(client, id, options)
-        const model = exact.providers.find((p) => p.providerInstanceId === provider.providerInstanceId)?.models.find((m) => m.id === id)
-        if (model) provider.models.push(model)
-      }))
+  }
+  if (!queue.length) return
+  let cursor = 0
+  const concurrency = Math.min(16, queue.length)
+  await Promise.all(Array.from({ length: concurrency }, async () => {
+    while (cursor < queue.length) {
+      const task = queue[cursor++]!
+      try {
+        const exact = await connectedCapabilities(client, task.id, options)
+        const model = exact.providers.find((p) => p.providerInstanceId === task.providerInstanceId)?.models.find((m) => m.id === task.id)
+        if (model) groups[task.groupIdx]!.found[task.itemIdx] = model
+      } catch { /* ignore individual omitted lookup error */ }
     }
+  }))
+  for (const g of groups) {
+    for (const model of g.found) if (model) g.provider.models.push(model)
   }
 }
 
 const CATALOG_TTL_MS = 10 * 60_000
+const CATALOG_STALE_MS = 24 * 60 * 60_000
 const openCodeDiskCachePath = () => join(homedir(), '.cache', 'devdash', 't3-opencode-catalog.json')
 
 function openCodeCacheKey(bin: string): string | undefined {
@@ -269,7 +446,7 @@ function openCodeCacheKey(bin: string): string | undefined {
   }
 }
 
-function readOpenCodeDiskCache(bin: string): SupervisorModel[] | undefined {
+function readOpenCodeDiskCache(bin: string): { at: number; models: SupervisorModel[] } | undefined {
   const expectedKey = openCodeCacheKey(bin)
   if (!expectedKey) return undefined
   try {
@@ -279,14 +456,14 @@ function readOpenCodeDiskCache(bin: string): SupervisorModel[] | undefined {
     if (!st.isFile() || st.isSymbolicLink() || st.uid !== uid || (st.mode & 0o077) !== 0) return undefined
     const parsed = JSON.parse(readFileSync(file, 'utf8')) as { key?: string; at?: number; models?: unknown }
     const now = Date.now()
-    if (parsed.key !== expectedKey || typeof parsed.at !== 'number' || parsed.at > now + 5_000 || now - parsed.at >= CATALOG_TTL_MS) return undefined
+    if (parsed.key !== expectedKey || typeof parsed.at !== 'number' || parsed.at > now + 5_000 || now - parsed.at >= CATALOG_STALE_MS) return undefined
     if (!Array.isArray(parsed.models)) return undefined
     const valid = parsed.models.every((m) =>
       m && typeof m === 'object' && typeof (m as SupervisorModel).id === 'string'
       && Array.isArray((m as SupervisorModel).variants) && (m as SupervisorModel).variants.every((v) => typeof v === 'string')
       && ((m as SupervisorModel).displayName === undefined || typeof (m as SupervisorModel).displayName === 'string')
     )
-    return valid ? parsed.models as SupervisorModel[] : undefined
+    return valid ? { at: parsed.at, models: parsed.models as SupervisorModel[] } : undefined
   } catch {
     return undefined
   }
@@ -314,23 +491,42 @@ function clearOpenCodeDiskCache(): void {
   try { unlinkSync(openCodeDiskCachePath()) } catch { /* ignore */ }
 }
 
-const catalogCache = new Map<string, { at: number; models: ReturnType<typeof supervisorModels> }>()
+const catalogCache = new Map<string, { at: number; models: ReturnType<typeof supervisorModels>; refreshing?: Promise<void> }>()
+function refreshNativeCatalogInBackground(provider: SupervisorProvider, entry: { at: number; models: ReturnType<typeof supervisorModels>; refreshing?: Promise<void> }) {
+  const started = generation
+  const p = supervisorModels(provider).then((list) => {
+    if (generation !== started) return
+    if (provider.kind === 'opencode') writeOpenCodeDiskCache(provider.bin, list)
+    catalogCache.set(provider.key, { at: Date.now(), models: Promise.resolve(list) })
+  }).catch(() => {}).finally(() => {
+    if (entry.refreshing === p) entry.refreshing = undefined
+  })
+  entry.refreshing = p
+}
 function nativeCatalog(provider: SupervisorProvider, allowDiskCache = false) {
-  const hit = catalogCache.get(provider.key)
-  if (hit && Date.now() - hit.at < CATALOG_TTL_MS) return hit.models
-  if (allowDiskCache && provider.kind === 'opencode') {
+  const now = Date.now()
+  let hit = catalogCache.get(provider.key)
+  if (!hit && allowDiskCache && provider.kind === 'opencode') {
     const disk = readOpenCodeDiskCache(provider.bin)
     if (disk) {
-      const models = Promise.resolve(disk)
-      catalogCache.set(provider.key, { at: Date.now(), models })
-      return models
+      hit = { at: disk.at, models: Promise.resolve(disk.models) }
+      catalogCache.set(provider.key, hit)
     }
   }
+  if (hit) {
+    const age = now - hit.at
+    if (age < CATALOG_TTL_MS) return hit.models
+    if (allowDiskCache && age < CATALOG_STALE_MS) {
+      if (!hit.refreshing) refreshNativeCatalogInBackground(provider, hit)
+      return hit.models
+    }
+  }
+  const started = generation
   const models = supervisorModels(provider).then((list) => {
-    if (provider.kind === 'opencode') writeOpenCodeDiskCache(provider.bin, list)
+    if (generation === started && provider.kind === 'opencode') writeOpenCodeDiskCache(provider.bin, list)
     return list
   })
-  catalogCache.set(provider.key, { at: Date.now(), models })
+  catalogCache.set(provider.key, { at: now, models })
   void models.catch(() => { if (catalogCache.get(provider.key)?.models === models) catalogCache.delete(provider.key) })
   return models
 }
@@ -406,8 +602,10 @@ export const invalidateInfo = () => {
   closeSharedClient()
   catalogCache.clear()
   clearOpenCodeDiskCache()
+  clearFullCapsDiskCache()
   capsCache = undefined
   fullCapsCache = undefined
+  fullCapsRefreshing = undefined
   cached = undefined
   probing = undefined
   void disposeSupervisorWorkers()

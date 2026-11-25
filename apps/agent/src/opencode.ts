@@ -3,9 +3,11 @@
 // OPENCODE_CONFIG_CONTENT, which outranks the member's own and the project's config (checked against 2.2.5), so nothing
 // is written into anyone's files.
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
@@ -38,14 +40,150 @@ const opencode = (profile: string, args: string[], timeout = 30_000) =>
   run(OPENCODE_BIN, [...args, STANDALONE], { env: { ...process.env, ...profileEnv(profile) }, timeout, cwd: homedir() }).then((r) => r.stdout)
 
 export const installed = () => existsSync(OPENCODE_BIN)
+
+let versionCache: { key: string; value: Promise<string | null> } | undefined
+function binSignature(): string {
+  try {
+    const real = realpathSync(OPENCODE_BIN)
+    const st = statSync(real)
+    return `${real}:${st.size}:${Math.trunc(st.mtimeMs)}`
+  } catch {
+    return OPENCODE_BIN
+  }
+}
+
 export async function version() {
   if (!installed()) return null
-  const out = await run(OPENCODE_BIN, ['--version'], { timeout: 10_000 }).then((r) => r.stdout, () => '')
-  return out.match(/\d+\.\d+\.\d+/)?.[0] ?? null
+  try {
+    const real = realpathSync(OPENCODE_BIN)
+    const pkgPath = join(dirname(real), '..', 'package.json')
+    if (existsSync(pkgPath)) {
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: unknown }
+      if (typeof pkg.version === 'string' && /^\d+\.\d+\.\d+/.test(pkg.version)) {
+        return pkg.version.match(/\d+\.\d+\.\d+/)?.[0] ?? null
+      }
+    }
+  } catch { /* fall back to --version */ }
+  const key = binSignature()
+  if (versionCache?.key === key) return versionCache.value
+  const value = run(OPENCODE_BIN, ['--version'], { timeout: 10_000 })
+    .then((r) => r.stdout, () => '')
+    .then((out) => out.match(/\d+\.\d+\.\d+/)?.[0] ?? null)
+  versionCache = { key, value }
+  return value
 }
+
+const PROVIDER_LABELS: Record<string, string> = {
+  opencode: 'OpenCode',
+  'opencode-go': 'OpenCode Go',
+  anthropic: 'Anthropic',
+  openai: 'OpenAI',
+  google: 'Google',
+  gemini: 'Google',
+  'github-copilot': 'GitHub Copilot',
+  openrouter: 'OpenRouter',
+  xai: 'xAI',
+  deepseek: 'DeepSeek',
+  groq: 'Groq',
+  mistral: 'Mistral',
+  'amazon-bedrock': 'Amazon Bedrock',
+  azure: 'Azure',
+}
+const ENV_PROVIDERS: [string, string][] = [
+  ['ANTHROPIC_API_KEY', 'Anthropic'],
+  ['OPENAI_API_KEY', 'OpenAI'],
+  ['GEMINI_API_KEY', 'Google'],
+  ['GOOGLE_GENERATIVE_AI_API_KEY', 'Google'],
+  ['OPENROUTER_API_KEY', 'OpenRouter'],
+  ['XAI_API_KEY', 'xAI'],
+  ['GROQ_API_KEY', 'Groq'],
+  ['DEEPSEEK_API_KEY', 'DeepSeek'],
+  ['MISTRAL_API_KEY', 'Mistral'],
+]
+
+function defaultDataDir() {
+  return join(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), 'opencode')
+}
+function profileDbPath(profile: string) {
+  return profile === 'default' ? join(defaultDataDir(), 'opencode.db') : join(profileDir(profile), 'opencode.db')
+}
+function profileAuthJsonPath(profile: string) {
+  return profile === 'default' ? join(defaultDataDir(), 'auth.json') : join(profileDir(profile), 'auth.json')
+}
+function fileSig(file: string): string {
+  try {
+    const st = statSync(file)
+    return `${st.size}:${Math.trunc(st.mtimeMs)}`
+  } catch {
+    return '-'
+  }
+}
+function profileAuthSignature(profile: string): string {
+  const db = profileDbPath(profile)
+  const envKeys = ENV_PROVIDERS.filter(([k]) => !!process.env[k]).map(([k]) => k).join(',')
+  return `${fileSig(db)}|${fileSig(db + '-wal')}|${fileSig(profileAuthJsonPath(profile))}|${envKeys}`
+}
+const providerLabel = (id: string) => PROVIDER_LABELS[id] ?? id
+
+function readProvidersDirect(profile: string): string[] | null {
+  const found = new Set<string>()
+  for (const [envKey, name] of ENV_PROVIDERS) {
+    if (process.env[envKey]) found.add(name)
+  }
+  const authFile = profileAuthJsonPath(profile)
+  if (existsSync(authFile)) {
+    try {
+      const parsed = JSON.parse(readFileSync(authFile, 'utf8')) as Record<string, unknown>
+      for (const id of Object.keys(parsed ?? {})) {
+        if (id && !id.startsWith('mcp_')) found.add(providerLabel(id))
+      }
+    } catch { /* ignore malformed auth.json */ }
+  }
+  const dbFile = profileDbPath(profile)
+  if (!existsSync(dbFile)) return [...found]
+  const db = new DatabaseSync(dbFile, { readOnly: true })
+  try {
+    db.exec('pragma query_only = on')
+    const tables = new Set(
+      (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name?: string }[])
+        .map((r) => r.name).filter((n): n is string => typeof n === 'string'),
+    )
+    if (tables.has('credential')) {
+      const rows = db.prepare('SELECT DISTINCT integration_id FROM credential WHERE active = 1').all() as { integration_id?: unknown }[]
+      for (const r of rows) {
+        if (typeof r.integration_id === 'string' && r.integration_id && !r.integration_id.startsWith('mcp_')) {
+          found.add(providerLabel(r.integration_id))
+        }
+      }
+    }
+    if (tables.has('account')) {
+      const row = db.prepare('SELECT count(*) AS n FROM account').get() as { n?: number } | undefined
+      if ((row?.n ?? 0) > 0) found.add('OpenCode')
+    }
+    if (tables.has('control_account')) {
+      const row = db.prepare('SELECT count(*) AS n FROM control_account WHERE active = 1').get() as { n?: number } | undefined
+      if ((row?.n ?? 0) > 0) found.add('OpenCode')
+    }
+    return [...found]
+  } catch {
+    return null
+  } finally {
+    try { db.close() } catch { /* ignore */ }
+  }
+}
+
+const providerListCache = new Map<string, { sig: string; at: number; names: string[] }>()
 
 /** The providers a profile has signed in to (API keys, OAuth), by name. */
 export async function providers(profile: string): Promise<string[]> {
+  const sig = profileAuthSignature(profile)
+  const hit = providerListCache.get(profile)
+  if (hit && hit.sig === sig && Date.now() - hit.at < 10 * 60_000) return hit.names
+  const direct = readProvidersDirect(profile)
+  if (direct !== null) {
+    providerListCache.set(profile, { sig, at: Date.now(), names: direct })
+    return direct
+  }
   const out = await opencode(profile, ['auth', 'list', '--format', 'json']).catch(() => '[]')
   let list: unknown
   try {
@@ -58,13 +196,97 @@ export async function providers(profile: string): Promise<string[]> {
     const o = (e ?? {}) as Record<string, unknown>
     return [o.name, o.provider, o.providerID, o.integration, o.id].find((v) => typeof v === 'string') as string | undefined
   })
-  return [...new Set(names.filter((n): n is string => !!n))]
+  const unique = [...new Set(names.filter((n): n is string => !!n))]
+  providerListCache.set(profile, { sig, at: Date.now(), names: unique })
+  return unique
+}
+
+const MODELS_TTL_MS = 10 * 60_000
+const MODELS_STALE_MS = 24 * 60 * 60_000
+const modelsDiskPath = (profile: string) => join(homedir(), '.cache', 'devdash', `opencode-models-${profile}.json`)
+const modelsMemCache = new Map<string, { key: string; at: number; models: Promise<string[]>; refreshing?: Promise<void> }>()
+
+function readModelsDiskCache(profile: string, expectedKey: string): { at: number; models: string[] } | undefined {
+  try {
+    const uid = process.getuid?.()
+    if (uid === undefined || uid < 1000 || uid >= 65534) return undefined
+    const file = modelsDiskPath(profile)
+    const st = lstatSync(file)
+    if (!st.isFile() || st.isSymbolicLink() || st.uid !== uid || (st.mode & 0o077) !== 0) return undefined
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { key?: string; at?: number; models?: unknown }
+    const now = Date.now()
+    if (parsed.key !== expectedKey || typeof parsed.at !== 'number' || parsed.at > now + 5_000 || now - parsed.at >= MODELS_STALE_MS) return undefined
+    if (!Array.isArray(parsed.models) || !parsed.models.every((m) => typeof m === 'string')) return undefined
+    return { at: parsed.at, models: parsed.models as string[] }
+  } catch {
+    return undefined
+  }
+}
+
+function writeModelsDiskCache(profile: string, key: string, list: string[]): void {
+  if (!list.length) return
+  try {
+    const uid = process.getuid?.()
+    if (uid === undefined || uid < 1000 || uid >= 65534) return
+    const file = modelsDiskPath(profile)
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+    const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
+    try {
+      writeFileSync(tmp, JSON.stringify({ key, at: Date.now(), models: list }), { mode: 0o600, flag: 'wx' })
+      renameSync(tmp, file)
+    } catch (err) {
+      try { unlinkSync(tmp) } catch { /* ignore */ }
+      throw err
+    }
+  } catch { /* best-effort cache */ }
+}
+
+async function fetchModelsCli(profile: string, key: string): Promise<string[]> {
+  const out = await opencode(profile, ['models'], 45_000).catch(() => '')
+  const list = out.split('\n').map((l) => l.trim()).filter((l) => /^[\w.-]+\/\S+$/.test(l))
+  writeModelsDiskCache(profile, key, list)
+  return list
 }
 
 /** Every model the profile can use, as provider/model ids. */
 export async function models(profile: string): Promise<string[]> {
-  const out = await opencode(profile, ['models'], 45_000).catch(() => '')
-  return out.split('\n').map((l) => l.trim()).filter((l) => /^[\w.-]+\/\S+$/.test(l))
+  if (!PROFILE_RE.test(profile)) throw new Error('invalid profile')
+  const key = `${binSignature()}|${profile}|${profileAuthSignature(profile)}`
+  const now = Date.now()
+  let hit = modelsMemCache.get(profile)
+  if (!hit || hit.key !== key) {
+    const disk = readModelsDiskCache(profile, key)
+    if (disk) {
+      hit = { key, at: disk.at, models: Promise.resolve(disk.models) }
+      modelsMemCache.set(profile, hit)
+    }
+  }
+  if (hit && hit.key === key) {
+    const age = now - hit.at
+    if (age < MODELS_TTL_MS) return hit.models
+    if (age < MODELS_STALE_MS) {
+      if (!hit.refreshing) {
+        const entry = hit
+        const p = fetchModelsCli(profile, key).then((list) => {
+          modelsMemCache.set(profile, { key, at: Date.now(), models: Promise.resolve(list) })
+        }).catch(() => {}).finally(() => {
+          if (entry.refreshing === p) entry.refreshing = undefined
+        })
+        entry.refreshing = p
+      }
+      return hit.models
+    }
+  }
+  const pending = fetchModelsCli(profile, key)
+  modelsMemCache.set(profile, { key, at: now, models: pending })
+  void pending.catch(() => { if (modelsMemCache.get(profile)?.models === pending) modelsMemCache.delete(profile) })
+  return pending
+}
+
+export function invalidateCache(): void {
+  versionCache = undefined
+  providerListCache.clear()
+  modelsMemCache.clear()
 }
 
 type Rule = { action: string; resource: string; effect: 'allow' | 'ask' | 'deny' }

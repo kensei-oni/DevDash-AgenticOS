@@ -853,11 +853,18 @@ export const pendingFor = (id: string) => [...(chats.get(id)?.pending.values() ?
 export const busy = () => [...chats.values()].some((c) => c.status === 'working' || c.status === 'waiting')
 
 const commandCache = new Map<string, Command[]>()
-const modelCache = new Map<string, { at: number; models: Promise<ModelChoice[]> }>()
+const modelCache = new Map<string, { at: number; cachesSig?: string; models: Promise<ModelChoice[]>; refreshing?: Promise<void> }>()
 /** Explicit connection refresh also invalidates the model picker, so newly connected models appear immediately. */
 export function refreshT3() {
   t3code.invalidateInfo()
-  for (const key of modelCache.keys()) if (key.startsWith('t3code:')) modelCache.delete(key)
+  opencode.invalidateCache()
+  providerCache.clear()
+  for (const key of modelCache.keys()) if (key.startsWith('t3code:') || key.startsWith('opencode:')) modelCache.delete(key)
+}
+/** Prewarms the default T3 Code model picker in the background when a member connection exists. */
+export function warmT3() {
+  if (!t3code.installed()) return
+  void commandsAndModels('t3code', 'default').catch(() => {})
 }
 export function t3SetupCommand(kind: t3code.T3SetupKind) {
   return t3code.setupCommand(kind)
@@ -880,12 +887,31 @@ export async function commandsAndModels(harness: string, profile: string, select
   if (!PROFILE_RE.test(profile)) throw new Error('invalid profile')
   const agent = agentOf(harness)
   const forSupervisor = harness === 't3code' && supervisor
-  const rev = harness === 't3code' ? `:${t3code.configRevision()}` : ''
+  const rev = harness === 't3code' ? `:${t3code.settingsRevision()}` : ''
   const key = `${harness}:${profile}${forSupervisor ? ':supervisor' : ''}${rev}`
+  const now = Date.now()
   let hit = modelCache.get(key)
-  if (!hit || Date.now() - hit.at > (harness === 't3code' ? 2 * 60_000 : 5 * 60_000)) {
+  if (harness === 't3code' && !forSupervisor) {
+    const sig = t3code.cachesSignature()
+    if (!hit || now - hit.at >= 60 * 60_000) {
+      const models = agent.models(profile)
+      hit = { at: now, cachesSig: sig, models }
+      modelCache.set(key, hit)
+      void models.catch(() => { if (modelCache.get(key)?.models === models) modelCache.delete(key) })
+    } else if ((now - hit.at > 2 * 60_000 || hit.cachesSig !== sig) && !hit.refreshing) {
+      const current = hit
+      const p = agent.models(profile).then((list) => {
+        if (modelCache.get(key) === current) {
+          modelCache.set(key, { at: Date.now(), cachesSig: t3code.cachesSignature(), models: Promise.resolve(list) })
+        }
+      }).catch(() => {}).finally(() => {
+        if (current.refreshing === p) current.refreshing = undefined
+      })
+      current.refreshing = p
+    }
+  } else if (!hit || now - hit.at > (harness === 't3code' ? 2 * 60_000 : 5 * 60_000)) {
     const models = forSupervisor ? t3code.modelChoices(undefined, true) : agent.models(profile)
-    hit = { at: Date.now(), models }
+    hit = { at: now, models }
     modelCache.set(key, hit)
     void models.catch(() => { if (modelCache.get(key)?.models === models) modelCache.delete(key) })
   }
@@ -899,21 +925,40 @@ export async function commandsAndModels(harness: string, profile: string, select
 }
 
 /** Each ACP agent, whether it's installed, and its profiles with the providers each has connected. */
-const providerCache = new Map<string, { at: number; list: Promise<string[]> }>()
+const providerCache = new Map<string, { at: number; list: Promise<string[]>; refreshing?: Promise<void> }>()
 const providersOf = (harness: string, a: Agent, profile: string) => {
   const key = `${harness}:${profile}`
+  const now = Date.now()
   const hit = providerCache.get(key)
-  if (hit && Date.now() - hit.at < 15_000) return hit.list
+  if (hit) {
+    const age = now - hit.at
+    if (age < 2 * 60_000) return hit.list
+    if (age < 60 * 60_000) {
+      if (!hit.refreshing) {
+        const p = a.providers(profile).then((fresh) => {
+          if (providerCache.get(key) === hit) providerCache.set(key, { at: Date.now(), list: Promise.resolve(fresh) })
+        }).catch(() => {}).finally(() => {
+          if (hit.refreshing === p) hit.refreshing = undefined
+        })
+        hit.refreshing = p
+      }
+      return hit.list
+    }
+  }
   const list = a.providers(profile)
-  providerCache.set(key, { at: Date.now(), list })
+  providerCache.set(key, { at: now, list })
+  void list.catch(() => { if (providerCache.get(key)?.list === list) providerCache.delete(key) })
   return list
 }
 export async function agents() {
   return Promise.all(Object.entries(AGENTS).map(async ([harness, a]) => {
     if (harness === 't3code') return t3code.info()
     if (!a.installed()) return { harness, installed: false, version: null, profiles: [] }
-    const profiles = await Promise.all(a.profileNames().map(async (name) => ({ name, providers: await providersOf(harness, a, name) })))
-    return { harness, installed: true, version: await a.version(), profiles, providers: profiles.find((p) => p.name === 'default')?.providers ?? [] }
+    const [profiles, version] = await Promise.all([
+      Promise.all(a.profileNames().map(async (name) => ({ name, providers: await providersOf(harness, a, name) }))),
+      a.version(),
+    ])
+    return { harness, installed: true, version, profiles, providers: profiles.find((p) => p.name === 'default')?.providers ?? [] }
   }))
 }
 
