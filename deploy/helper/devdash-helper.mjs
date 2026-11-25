@@ -62,6 +62,7 @@ const BROWSER_CHROMIUM_CONF = '/etc/devdash/browser-chromium.conf'
 const BROWSER_CDP_PROXY = '/etc/devdash/browser-cdp-proxy.py'
 const BROWSER_POLICIES = '/etc/devdash/browser-policies.json'
 const BROWSER_CDP_DIR = '/run/devdash/browser-cdp'
+const BROWSER_CDP_MOUNT = `${BROWSER_CDP_DIR}/proxy`
 // Neko's image ships DeveloperToolsAvailability: 2, which blocks CDP page attachment with "Not allowed".
 // Keep all of Neko's sandbox policies intact and set DeveloperToolsAvailability: 0 so loopback CDP works
 // on regular pages while force-installed extensions remain protected.
@@ -161,7 +162,7 @@ stdout_logfile_backups=2
 redirect_stderr=true
 `
 const BROWSER_CDP_PROXY_TEXT = String.raw`#!/usr/bin/env python3
-import hmac, json, os, re, socket, struct, threading
+import hmac, http.client, json, os, re, socket, struct, threading
 
 TOKEN = os.environ.get("DEVDASH_CDP_TOKEN", "")
 SOCK_PATH = "/run/devdash-cdp/cdp.sock"
@@ -172,6 +173,9 @@ ALLOWED_CDP_METHODS = frozenset({
     "Page.enable",
     "Page.bringToFront",
     "Page.navigate",
+    "Page.reload",
+    "Page.getNavigationHistory",
+    "Page.navigateToHistoryEntry",
     "Page.captureScreenshot",
     "Runtime.evaluate",
     "Input.dispatchMouseEvent",
@@ -249,21 +253,6 @@ def encode_ws_frame(opcode, payload, mask=False):
         masked = bytes(payload[i] ^ key[i & 3] for i in range(n))
         return header + key + masked
     return header + payload
-
-def pipe(src, dst):
-    try:
-        while True:
-            data = src.recv(65536)
-            if not data:
-                break
-            dst.sendall(data)
-    except OSError:
-        pass
-    finally:
-        try:
-            dst.shutdown(socket.SHUT_WR)
-        except OSError:
-            pass
 
 def filter_client_ws(client, upstream, client_lock):
     frag_opcode = None
@@ -349,7 +338,6 @@ def handle(client):
             client.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return
         head = buf[:sep].decode("latin1")
-        rest = buf[sep + 4:]
         lines = head.split("\r\n")
         parts = lines[0].split(" ") if lines else []
         if len(parts) < 2:
@@ -367,9 +355,9 @@ def handle(client):
             if kl == "x-devdash-cdp-token":
                 got = v.strip()
                 continue
-            if kl in ("host", "origin"):
-                continue
-            out.append(line)
+            # The frame filter reads plain JSON. Negotiate only the basic WebSocket handshake.
+            if kind == "ws" and kl in ("upgrade", "connection", "sec-websocket-key", "sec-websocket-version"):
+                out.append(line)
         if not TOKEN or not hmac.compare_digest(got, TOKEN):
             client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return
@@ -377,7 +365,9 @@ def handle(client):
             client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return
         out.append("Host: 127.0.0.1:9222")
-        payload = ("\r\n".join(out) + "\r\n\r\n").encode("latin1") + rest
+        if kind == "http":
+            out.append("Connection: close")
+        payload = ("\r\n".join(out) + "\r\n\r\n").encode("latin1")
         upstream = socket.create_connection(("127.0.0.1", 9222), timeout=5.0)
         upstream.sendall(payload)
         if kind == "ws":
@@ -402,12 +392,14 @@ def handle(client):
             filter_client_ws(client, upstream, lock)
             t.join(timeout=2.0)
         else:
-            client.settimeout(None)
-            upstream.settimeout(None)
-            t = threading.Thread(target=pipe, args=(upstream, client), daemon=True)
-            t.start()
-            pipe(client, upstream)
-            t.join(timeout=2.0)
+            # Each HTTP request is authorized separately. These DevTools endpoints take no request body.
+            with http.client.HTTPResponse(upstream) as response:
+                response.begin()
+                mime = response.getheader("Content-Type", "application/octet-stream")
+                header = f"HTTP/1.1 {response.status} {response.reason}\r\nContent-Type: {mime}\r\nConnection: close\r\n\r\n"
+                client.sendall(header.encode("latin1"))
+                while chunk := response.read(65536):
+                    client.sendall(chunk)
     except OSError:
         pass
     finally:
@@ -556,11 +548,27 @@ const commands = {
    * the stream goes straight to the server's public IP on UDP 59000 / TCP 59001, signaling through DevDash.
    */
   'browser-start'() {
-    if (DRY) { planned.push(`docker run devdash-browser ${browserImage()}`); return {} }
     const image = browserImage()
-    const state = run('docker', ['inspect', '-f', '{{.State.Running}}', BROWSER], { allowFail: true })
+    const state = DRY ? null : run('docker', ['inspect', '-f', '{{.State.Running}}', BROWSER], { allowFail: true })
     if (state === 'true') return {}
-    if (state === 'false') { run('docker', ['start', BROWSER]); return {} }
+    // Only the server can traverse the host parent. The container sees just its writable socket directory.
+    run('install', ['-d', '-m', '0750', '-o', 'root', '-g', 'devdash', BROWSER_CDP_DIR])
+    run('install', ['-d', '-m', '1777', '-o', 'root', '-g', 'root', BROWSER_CDP_MOUNT])
+    run('ln', ['-sfnT', 'proxy/cdp.sock', `${BROWSER_CDP_DIR}/cdp.sock`])
+    if (DRY) { planned.push(`docker run devdash-browser ${image}`); return {} }
+    if (state === 'false') {
+      const mounts = JSON.parse(run('docker', ['inspect', '-f', '{{json .Mounts}}', BROWSER]))
+      if (mounts.some((m) => m.Destination === '/run/devdash-cdp' && m.Source === BROWSER_CDP_MOUNT)) {
+        run('docker', ['start', BROWSER])
+        browserEgressRules('add')
+        return {}
+      }
+      // Recreate an older stopped container with the new mount. Its named profile survives docker rm.
+      if (!mounts.some((m) => m.Destination === BROWSER_PROFILE_DIR && m.Name === 'devdash-browser-profile')) {
+        throw new Refused('cannot replace a stopped browser with an unrecognized profile mount')
+      }
+      run('docker', ['rm', BROWSER])
+    }
     // Secrets DevDash uses to sign people in (members: full control; guests: watch only) and to ask who's watching.
     const env = existsSync(BROWSER_ENV) ? readFileSync(BROWSER_ENV, 'utf8') : ''
     const missing = ['NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD', 'NEKO_MEMBER_MULTIUSER_USER_PASSWORD', 'NEKO_SESSION_API_TOKEN', 'DEVDASH_CDP_TOKEN']
@@ -574,7 +582,6 @@ const commands = {
     // Chromium refuses a profile whose lock names another "computer": every new container used to be one. Same
     // hostname each time, and stale locks cleared (logins and cookies are untouched).
     run('docker', ['run', '--rm', '--entrypoint', 'sh', '-v', 'devdash-browser-profile:/p', image, '-c', 'rm -f /p/Singleton*'], { allowFail: true })
-    run('install', ['-d', '-m', '0750', '-o', 'root', '-g', 'devdash', BROWSER_CDP_DIR])
     writeFileSync(BROWSER_CHROMIUM_CONF, BROWSER_CHROMIUM_CONF_TEXT, { mode: 0o644 })
     writeFileSync(BROWSER_CDP_PROXY, BROWSER_CDP_PROXY_TEXT, { mode: 0o755 })
     writeFileSync(BROWSER_POLICIES, BROWSER_POLICIES_TEXT, { mode: 0o644 })
@@ -592,7 +599,7 @@ const commands = {
       '-v', `devdash-browser-profile:${BROWSER_PROFILE_DIR}`,
       '-v', `${BROWSER_CHROMIUM_CONF}:/etc/neko/supervisord/chromium.conf:ro`,
       '-v', `${BROWSER_CDP_PROXY}:/etc/neko/devdash-cdp-proxy.py:ro`,
-      '-v', `${BROWSER_CDP_DIR}:/run/devdash-cdp`,
+      '-v', `${BROWSER_CDP_MOUNT}:/run/devdash-cdp`,
       '-v', `${BROWSER_POLICIES}:/etc/chromium/policies/managed/policies.json:ro`,
       image])
     browserEgressRules('add')

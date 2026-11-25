@@ -1,7 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { once } from 'node:events'
+import { createServer, get } from 'node:http'
+import { setTimeout as delay } from 'node:timers/promises'
+import { WebSocket, WebSocketServer } from 'ws'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -140,7 +144,12 @@ test('the browser runs the newest release downloaded, else its original image; s
   assert.equal(v('').image, 'ghcr.io/m1k1o/neko/chromium:3.1')
   assert.equal(v('3.1 3.2.0 3.10.1 3.9.4 latest 4.0.0').image, 'ghcr.io/m1k1o/neko/chromium:3.10.1', 'by number, not text; never another major')
   assert.equal(v('').major, 3)
-  assert.deepEqual(call({ cmd: 'browser-start' }, fake('3.1 3.2.0')).planned, ['docker run devdash-browser ghcr.io/m1k1o/neko/chromium:3.2.0'])
+  assert.deepEqual(call({ cmd: 'browser-start' }, fake('3.1 3.2.0')).planned, [
+    'install -d -m 0750 -o root -g devdash /run/devdash/browser-cdp',
+    'install -d -m 1777 -o root -g root /run/devdash/browser-cdp/proxy',
+    'ln -sfnT proxy/cdp.sock /run/devdash/browser-cdp/cdp.sock',
+    'docker run devdash-browser ghcr.io/m1k1o/neko/chromium:3.2.0',
+  ])
   assert.deepEqual(call({ cmd: 'browser-stop' }, fake('3.1 3.1.6 3.2.0')).planned, [
     'docker stop --time 15 devdash-browser', 'docker rm -f devdash-browser',
     'docker rmi ghcr.io/m1k1o/neko/chromium:3.1.6', 'docker image prune -f --filter label=net.m1k1o.neko.api-version',
@@ -219,6 +228,44 @@ test('embedded browser CDP proxy compiles cleanly and Chromium policies preserve
   assert.match(src, /URLBlocklist:\s*\['file:\/\/\*',\s*'chrome:\/\/policy'/, 'policy keeps file:// blocklist')
   assert.match(src, /DownloadRestrictions:\s*3/, 'policy keeps download restrictions')
   assert.match(src, /AllowFileSelectionDialogs:\s*false/, 'policy keeps file dialog restriction')
+})
+
+test('browser proxy closes each discovery response and carries CDP commands when both peers offer compression', { skip: process.platform === 'win32', timeout: 8000 }, async (t) => {
+  const script = readFileSync(HELPER, 'utf8').match(/const BROWSER_CDP_PROXY_TEXT = String\.raw`([\s\S]*?)`\n/)![1]
+  const dir = mkdtempSync(join(tmpdir(), 'dd-proxy-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const server = createServer((_req, res) => res.end('[]'))
+  const upstream = new WebSocketServer({ server, perMessageDeflate: true })
+  t.after(() => { upstream.close(); server.close() })
+  upstream.on('connection', (socket) => socket.on('message', (data) => socket.send(data.toString())))
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const addr = server.address()
+  assert.ok(addr && typeof addr !== 'string')
+  const socketPath = join(dir, 'cdp.sock')
+  const proxy = spawn('python3', ['-c', script
+    .replace('"/run/devdash-cdp/cdp.sock"', JSON.stringify(socketPath))
+    .replace('("127.0.0.1", 9222)', `("127.0.0.1", ${addr.port})`)], { env: { ...process.env, DEVDASH_CDP_TOKEN: 'test-token' } })
+  t.after(() => { proxy.kill() })
+  for (let i = 0; i < 100 && !existsSync(socketPath) && proxy.exitCode === null; i++) await delay(20)
+  assert.ok(existsSync(socketPath), 'Python proxy is listening')
+  const headers = { 'X-DevDash-CDP-Token': 'test-token' }
+  for (let i = 0; i < 2; i++) {
+    const res = await new Promise<import('node:http').IncomingMessage>((resolve, reject) => {
+      get({ socketPath, path: '/json/list', headers }, resolve).on('error', reject)
+    })
+    assert.equal(res.headers.connection, 'close')
+    let body = ''
+    for await (const chunk of res) body += chunk
+    assert.equal(body, '[]')
+  }
+  const client = new WebSocket(`ws+unix://${socketPath}:/devtools/page/test`, { headers, perMessageDeflate: true })
+  t.after(() => client.terminate())
+  await once(client, 'open')
+  assert.equal(client.extensions, '')
+  const command = JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: 'document.title' } })
+  const reply = once(client, 'message')
+  client.send(command)
+  assert.equal(String((await reply)[0]), command)
 })
 
 test('t3-ensure: validates member account, installs/enables systemd unit only, and never touches member home paths', () => {
