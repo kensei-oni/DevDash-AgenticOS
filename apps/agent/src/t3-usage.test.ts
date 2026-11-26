@@ -63,7 +63,7 @@ test('live member T3 usage RPC fetches limits and token/price summary when runni
     assert.equal(summary.resolution, 'day')
     assert.ok(Array.isArray(summary.buckets))
     assert.ok(Array.isArray(summary.sources))
-    assert.ok(typeof summary.pricing.modelCount === 'number')
+    assert.ok(typeof summary.pricing.knownModels === 'number')
   } finally {
     closeUsageClient()
   }
