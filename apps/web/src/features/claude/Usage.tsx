@@ -1,12 +1,24 @@
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowUpRight } from 'lucide-react'
+import { ArrowUpRight, RotateCw } from 'lucide-react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { api, unwrap } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { ErrorAlert } from '../auth/LoginPage'
 import type { Harness } from './harness'
-import { computeWindowPace, formatResetCountdown, providerColor, providerLabel, t3UsageLimitsQuery } from './t3-usage'
+import { LimitWindowRow } from './T3UsagePage'
+import {
+  aggregateT3Usage,
+  browserTimeZone,
+  formatCompactTokens,
+  formatUsd,
+  providerColor,
+  providerLabel,
+  t3UsageLimitsQuery,
+  t3UsageSummaryQuery,
+  useLiveT3Usage,
+} from './t3-usage'
 
 type Limit = { kind: string; percent: number | null; severity?: string; resets_at: string | null; is_active?: boolean; scope?: { model?: { display_name?: string | null } | null } | null }
 type Window = { utilization: number | null; resets_at: string | null } | null
@@ -21,8 +33,8 @@ export const usageQuery = (profile: string) => ({
 export const sessionUsageQuery = (id: string) => ({
   queryKey: ['claude', 'session-usage', id],
   queryFn: () => unwrap(api.api.claude.sessions[':id'].usage.$get({ param: { id } })),
-  staleTime: 15_000,
-  refetchInterval: 30_000,
+  staleTime: 10_000,
+  refetchInterval: 15_000,
 })
 
 // Same formatters as the per-answer line (Blocks.tsx) so numbers read the same everywhere.
@@ -30,13 +42,41 @@ const kTokens = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M
 const money = (n: number) => (n < 0.0005 ? '$0' : n < 0.01 ? `$${n.toFixed(3)}` : `$${n.toFixed(2)}`)
 
 /** This session's own running total: cost, tokens in/out and how many answers, above the plan limits. */
-function SessionUsage({ id }: { id: string }) {
+function SessionUsage({ id, harness }: { id: string; harness?: Harness }) {
   const q = useQuery(sessionUsageQuery(id))
+  const tz = useMemo(() => browserTimeZone(), [])
+  const daySummaryQ = useQuery({
+    ...t3UsageSummaryQuery('day', tz),
+    enabled: harness === 't3code',
+  })
+
   if (q.isPending) return <Skeleton className="h-10" />
   if (q.error) return <ErrorAlert error={q.error} />
   const u = q.data.usage
-  // "in" is everything read, like the per-answer line: new tokens plus the cache it reads and writes.
   const read = u.inputTokens + u.cacheReadTokens + u.cacheWriteTokens
+
+  if (harness === 't3code' && read === 0 && u.outputTokens === 0 && u.cost === 0) {
+    const dayAgg = aggregateT3Usage(daySummaryQ.data)
+    return (
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="font-medium">This session</span>
+          <span className="text-xs tabular-nums text-muted-foreground">
+            {u.turns > 0 ? `${u.turns} turn${u.turns === 1 ? '' : 's'}` : 'No answers yet'}
+          </span>
+        </div>
+        {daySummaryQ.data?.connected && (
+          <div className="flex items-baseline justify-between gap-2 rounded-xl bg-surface px-3 py-2 text-xs tabular-nums">
+            <span className="text-muted-foreground">Last 24h in T3 Code</span>
+            <span className="font-medium text-foreground">
+              {formatCompactTokens(dayAgg.totalTokens)} tok · {formatUsd(dayAgg.costUsd)}
+            </span>
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-baseline justify-between gap-2">
@@ -70,12 +110,6 @@ function resets(iso: string | null) {
   return `Resets ${new Date(iso).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })}`
 }
 
-/**
- * This session's own usage (when a session is in view) above the plan/provider limits:
- * - Claude Code sessions show Claude plan limits (/usage in Claude Code).
- * - T3 Code sessions show live T3 Code provider rate limits + a direct link to /usage (Limits, Tokens & Price).
- * - OpenCode sessions show only the session's own cost and tokens.
- */
 export function PlanUsage({
   profile,
   sessionId,
@@ -93,13 +127,13 @@ export function PlanUsage({
 }) {
   return (
     <div className={cn('flex flex-col gap-4', className)}>
-      {sessionId && <SessionUsage id={sessionId} />}
+      {sessionId && <SessionUsage id={sessionId} harness={harness} />}
       {harness === 't3code' ? (
         <div className="flex flex-col gap-3">
           {sessionId && (
             <div className="flex items-baseline justify-between gap-2">
               <h3 className="text-xs font-medium text-muted-foreground">T3 Code limits</h3>
-              <Link to="/usage" className="inline-flex items-center gap-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground">
+              <Link to="/usage" className="inline-flex items-center gap-0.5 text-xs font-medium text-foreground/80 transition-colors hover:text-foreground">
                 Tokens &amp; price<ArrowUpRight className="size-3" />
               </Link>
             </div>
@@ -128,7 +162,15 @@ function modelDriver(model: string | null | undefined): string | null {
 }
 
 function T3SessionLimits({ model }: { model?: string | null }) {
+  useLiveT3Usage()
   const q = useQuery(t3UsageLimitsQuery())
+  const [nowMs, setNowMs] = useState(() => Date.now())
+
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 10_000)
+    return () => clearInterval(id)
+  }, [])
+
   if (q.isPending) return <div className="flex flex-col gap-3">{[0, 1].map((i) => <Skeleton key={i} className="h-9" />)}</div>
   if (q.error) return <ErrorAlert error={q.error} />
   if (!q.data.connected) {
@@ -155,16 +197,22 @@ function T3SessionLimits({ model }: { model?: string | null }) {
   })
 
   return (
-    <div className="flex flex-col gap-3.5">
+    <div className="flex flex-col gap-4">
+      {q.data.refreshing && (
+        <div className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <RotateCw className="size-3 animate-spin" />
+          <span>Syncing live provider limits…</span>
+        </div>
+      )}
       {ordered.map((acct) => {
         const color = providerColor(acct.driver, acct.accentColor)
         return (
-          <div key={acct.id} className="flex flex-col gap-2">
+          <div key={acct.id} className="flex flex-col gap-2.5">
             <div className="flex items-center justify-between gap-2 text-xs">
               <span className="inline-flex min-w-0 items-center gap-1.5 font-medium">
                 <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
                 <span className="truncate">{acct.displayName || acct.label || providerLabel(acct.driver)}</span>
-                {acct.plan && <span className="shrink-0 text-muted-foreground">· {acct.plan}</span>}
+                {acct.plan && <span className="truncate text-muted-foreground">· {acct.plan}</span>}
               </span>
               {acct.resetCredits && acct.resetCredits.availableCount > 0 && (
                 <Link to="/usage" search={{ tab: 'limits' }} className="shrink-0 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground hover:text-foreground">
@@ -172,32 +220,11 @@ function T3SessionLimits({ model }: { model?: string | null }) {
                 </Link>
               )}
             </div>
-            {acct.windows.map((w) => {
-              const pct = Math.max(0, Math.min(100, w.usedPercent))
-              const pace = computeWindowPace(w)
-              const tone = pct >= 90 ? 'bg-destructive' : pct >= 75 || pace?.state === 'fast' ? 'bg-attention' : 'bg-foreground/80'
-              const countdown = formatResetCountdown(w.resetsAt)
-              return (
-                <div key={w.id} className="flex flex-col gap-1">
-                  <div className="flex items-baseline justify-between gap-2 text-xs">
-                    <span className="text-muted-foreground">{w.label}</span>
-                    <span className="tabular-nums text-muted-foreground">{Math.round(pct)}%</span>
-                  </div>
-                  <div className="relative h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label={`${acct.label} ${w.label}`} aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
-                    <div className={cn('h-full rounded-full', tone)} style={{ width: `${pct}%` }} />
-                    {pace && (
-                      <span
-                        aria-hidden
-                        title={`Steady pace: ${Math.round(100 - pace.timeLeftPercent)}%`}
-                        className="absolute inset-y-0 w-0.5 bg-foreground/60"
-                        style={{ left: `${Math.max(1, Math.min(99, 100 - pace.timeLeftPercent))}%` }}
-                      />
-                    )}
-                  </div>
-                  {countdown && <span className="text-[11px] text-muted-foreground">{countdown}</span>}
-                </div>
-              )
-            })}
+            <div className="flex flex-col gap-2.5">
+              {acct.windows.map((w) => (
+                <LimitWindowRow key={w.id} window={w} color={color} nowMs={nowMs} compact />
+              ))}
+            </div>
           </div>
         )
       })}
@@ -215,7 +242,6 @@ function PlanLimits({ profile }: { profile: string }) {
   const raw = u.limits as Record<string, unknown>
   let limits = (Array.isArray(raw.limits) ? raw.limits : []) as Limit[]
   if (!limits.length) {
-    // Older shape: named windows only.
     const w = (k: string) => raw[k] as Window
     limits = [['session', w('five_hour')], ['weekly_all', w('seven_day')]]
       .filter(([, v]) => v)

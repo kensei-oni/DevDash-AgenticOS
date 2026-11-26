@@ -17,7 +17,8 @@ const RPC_SCOPES = ['orchestration:read', 'diagnostics:read', 'settings:write', 
 const TOKEN_GRANT = 'urn:ietf:params:oauth:grant-type:token-exchange'
 const BOOTSTRAP_TOKEN_TYPE = 'urn:t3:params:oauth:token-type:environment-bootstrap'
 const ACCESS_TOKEN_TYPE = 'urn:ietf:params:oauth:token-type:access_token'
-const IDLE_CLOSE_MS = 20_000
+const IDLE_CLOSE_MS = 90_000
+const LIVE_LIMITS_STALE_MS = 25_000
 
 export type T3UsagePeriod = 'day' | 'week' | 'month' | 'quarter'
 
@@ -78,6 +79,7 @@ export type T3LimitAccount = {
 export type T3LimitsResponse = {
   connected: boolean
   checkedAt: string
+  refreshing?: boolean
   accounts: T3LimitAccount[]
   notices: string[]
   error?: string
@@ -419,6 +421,7 @@ class T3RpcConnection {
   private recv: Buffer
   private nextId = 1
   private pending = new Map<string, PendingCall>()
+  private subscriptions = new Map<string, (v: unknown) => void>()
   private fragOpcode = 0
   private fragChunks: Buffer[] = []
   private closed = false
@@ -440,9 +443,18 @@ class T3RpcConnection {
     return !this.closed && !this.socket.destroyed
   }
 
+  touchIdle(): void {
+    this.bumpIdle()
+  }
+
   private bumpIdle(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer)
-    if (this.pending.size > 0 || this.closed) return
+    if (this.closed) return
+    if (this.pending.size > 0) {
+      this.socket.ref?.()
+      return
+    }
+    this.socket.unref?.()
     this.idleTimer = setTimeout(() => this.close(), IDLE_CLOSE_MS)
     this.idleTimer.unref?.()
   }
@@ -459,6 +471,7 @@ class T3RpcConnection {
   private failAll(err: Error): void {
     this.closed = true
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null }
+    this.subscriptions.clear()
     for (const [, p] of this.pending) {
       clearTimeout(p.timer)
       p.reject(err)
@@ -471,8 +484,23 @@ class T3RpcConnection {
     this.socket.write(encodeWsFrame(0x1, Buffer.from(JSON.stringify(msg), 'utf8')))
   }
 
+  subscribe(tag: string, payload: Record<string, unknown>, onChunk: (v: unknown) => void): () => void {
+    const id = String(this.nextId++)
+    this.subscriptions.set(id, onChunk)
+    try {
+      this.sendJson({ _tag: 'Request', id, tag, payload, headers: [] })
+    } catch {
+      this.subscriptions.delete(id)
+    }
+    return () => {
+      if (!this.subscriptions.delete(id)) return
+      try { this.sendJson({ _tag: 'Interrupt', requestId: id, interruptors: [] }) } catch { /* ignore */ }
+    }
+  }
+
   call<T = unknown>(tag: string, payload: Record<string, unknown>, timeoutMs = 20_000): Promise<T> {
     const id = String(this.nextId++)
+    this.socket.ref?.()
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null }
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -500,6 +528,7 @@ class T3RpcConnection {
     timeoutMs = 15_000,
   ): Promise<T> {
     const id = String(this.nextId++)
+    this.socket.ref?.()
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null }
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -596,6 +625,16 @@ class T3RpcConnection {
       }
       const reqId = typeof msg.requestId === 'string' ? msg.requestId : null
       if (!reqId) continue
+      const sub = this.subscriptions.get(reqId)
+      if (sub) {
+        if (msg._tag === 'Chunk' && Array.isArray(msg.values)) {
+          try { this.sendJson({ _tag: 'Ack', requestId: reqId }) } catch { /* ignore */ }
+          for (const v of msg.values) sub(v)
+        } else if (msg._tag === 'Exit') {
+          this.subscriptions.delete(reqId)
+        }
+        continue
+      }
       const pending = this.pending.get(reqId)
       if (!pending) continue
 
@@ -643,11 +682,121 @@ function extractRpcError(cause: unknown): string {
 let sharedConn: T3RpcConnection | null = null
 let connectingConn: Promise<T3RpcConnection> | null = null
 
+type LiveConfigCache = {
+  conn: T3RpcConnection
+  providers: Record<string, unknown>[]
+  sources: Record<string, unknown>[]
+  hasSnapshot: boolean
+  ready: Promise<void>
+}
+
+let liveConfig: LiveConfigCache | null = null
+let refreshInFlight: Promise<void> | null = null
+let lastRefreshAt = 0
+let usageEmitter: (() => void) | null = null
+let emitThrottleTimer: ReturnType<typeof setTimeout> | null = null
+
+export function setUsageEmitter(fn: (() => void) | null): void {
+  usageEmitter = fn
+}
+
+function notifyUsageUpdated(): void {
+  if (!usageEmitter || emitThrottleTimer) return
+  emitThrottleTimer = setTimeout(() => {
+    emitThrottleTimer = null
+    try { usageEmitter?.() } catch { /* ignore */ }
+  }, 350)
+  emitThrottleTimer.unref?.()
+}
+
 export function closeUsageClient(): void {
+  if (emitThrottleTimer) {
+    clearTimeout(emitThrottleTimer)
+    emitThrottleTimer = null
+  }
+  liveConfig = null
+  refreshInFlight = null
   if (sharedConn) {
     sharedConn.close()
     sharedConn = null
   }
+}
+
+function ensureLiveConfig(conn: T3RpcConnection): LiveConfigCache {
+  if (liveConfig && liveConfig.conn === conn && conn.isOpen) {
+    conn.touchIdle()
+    return liveConfig
+  }
+  let resolveReady!: () => void
+  let rejectReady!: (err: Error) => void
+  const ready = new Promise<void>((res, rej) => {
+    resolveReady = res
+    rejectReady = rej
+  })
+  const state: LiveConfigCache = {
+    conn,
+    providers: [],
+    sources: [],
+    hasSnapshot: false,
+    ready,
+  }
+  const initTimer = setTimeout(() => {
+    if (!state.hasSnapshot) rejectReady(new Error('Timed out waiting for T3 Code subscribeServerConfig snapshot.'))
+  }, 15_000)
+  initTimer.unref?.()
+
+  conn.subscribe('subscribeServerConfig', { usageLimitSources: true, usageLimitsCommand: true }, (raw) => {
+    if (!raw || typeof raw !== 'object') return
+    const ev = raw as { type?: string; config?: Record<string, unknown>; payload?: Record<string, unknown> }
+    if (ev.type === 'snapshot' && ev.config && typeof ev.config === 'object') {
+      state.providers = Array.isArray(ev.config.providers) ? ev.config.providers as Record<string, unknown>[] : []
+      state.sources = Array.isArray(ev.config.usageLimitSources) ? ev.config.usageLimitSources as Record<string, unknown>[] : []
+      if (!state.hasSnapshot) {
+        state.hasSnapshot = true
+        clearTimeout(initTimer)
+        resolveReady()
+      } else {
+        notifyUsageUpdated()
+      }
+    } else if (ev.type === 'providerStatuses' && ev.payload && Array.isArray(ev.payload.providers)) {
+      state.providers = ev.payload.providers as Record<string, unknown>[]
+      notifyUsageUpdated()
+    } else if (ev.type === 'usageLimitSourcesUpdated' && ev.payload && Array.isArray(ev.payload.sources)) {
+      state.sources = ev.payload.sources as Record<string, unknown>[]
+      notifyUsageUpdated()
+    }
+  })
+
+  liveConfig = state
+  return state
+}
+
+function startBackgroundLimitsRefresh(conn: T3RpcConnection): Promise<void> {
+  if (refreshInFlight) return refreshInFlight
+  lastRefreshAt = Date.now()
+  const p = conn.call('server.refreshProviders', { fresh: true }, 25_000)
+    .then(() => {})
+    .catch(() => {})
+    .finally(() => {
+      if (refreshInFlight === p) refreshInFlight = null
+      notifyUsageUpdated()
+    })
+  refreshInFlight = p
+  return p
+}
+
+/** Triggers a background provider limit probe (e.g. right after a T3 turn finishes) and pushes live updates. */
+export function nudgeUsageRefresh(): void {
+  try {
+    memberPaths()
+  } catch {
+    return
+  }
+  notifyUsageUpdated()
+  void withRpc(async (conn) => {
+    ensureLiveConfig(conn)
+    await startBackgroundLimitsRefresh(conn)
+  }).catch(() => {})
 }
 
 async function getRpcConnection(): Promise<T3RpcConnection> {
@@ -788,18 +937,13 @@ export async function getUsageLimits(opts: { refresh?: boolean } = {}): Promise<
   }
 
   return withRpc(async (conn) => {
+    const state = ensureLiveConfig(conn)
+    await state.ready
     if (opts.refresh) {
-      await conn.call('server.refreshProviders', { fresh: true }, 25_000).catch(() => {})
+      await startBackgroundLimitsRefresh(conn)
     }
-    const snap = await conn.callStreamFirst<{ type?: string; config?: Record<string, unknown> }>(
-      'subscribeServerConfig',
-      { usageLimitSources: true, usageLimitsCommand: true },
-      (chunk) => !!chunk && typeof chunk === 'object' && (chunk as { type?: string }).type === 'snapshot',
-      15_000,
-    )
-    const config = snap.config ?? {}
-    const providers = Array.isArray(config.providers) ? config.providers as Record<string, unknown>[] : []
-    const sources = Array.isArray(config.usageLimitSources) ? config.usageLimitSources as Record<string, unknown>[] : []
+    const providers = state.providers
+    const sources = state.sources
 
     const accounts: T3LimitAccount[] = []
     const notices: string[] = []
@@ -904,9 +1048,23 @@ export async function getUsageLimits(opts: { refresh?: boolean } = {}): Promise<
       }
     }
 
+    if (!opts.refresh && !refreshInFlight) {
+      const now = Date.now()
+      const checkedTimes = accounts
+        .filter((a) => a.windows.length > 0 && a.checkedAt)
+        .map((a) => Date.parse(a.checkedAt!))
+        .filter((t) => Number.isFinite(t))
+      const newestChecked = checkedTimes.length ? Math.max(...checkedTimes) : 0
+      const stale = newestChecked === 0 || now - newestChecked > LIVE_LIMITS_STALE_MS
+      if (stale && now - lastRefreshAt > LIVE_LIMITS_STALE_MS) {
+        void startBackgroundLimitsRefresh(conn)
+      }
+    }
+
     return {
       connected: true,
       checkedAt: new Date().toISOString(),
+      refreshing: refreshInFlight !== null,
       accounts,
       notices,
     }

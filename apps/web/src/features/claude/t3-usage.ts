@@ -1,5 +1,6 @@
-import { queryOptions } from '@tanstack/react-query'
+import { queryOptions, useQueryClient } from '@tanstack/react-query'
 import { api, unwrap } from '@/lib/api'
+import { useTopic } from '@/lib/live'
 import type { T3UsagePeriod } from './t3-usage-math.ts'
 
 export * from './t3-usage-math.ts'
@@ -33,12 +34,23 @@ export const t3UsageLimitsQuery = () =>
   queryOptions({
     queryKey: ['t3-usage', 'limits'],
     queryFn: () => fetchT3Limits(false),
-    staleTime: 45_000,
+    staleTime: 10_000,
+    refetchInterval: 20_000,
+    refetchOnWindowFocus: 'always',
   })
 
 export const t3UsageSummaryQuery = (period: T3UsagePeriod, tz = browserTimeZone()) =>
   queryOptions({
     queryKey: ['t3-usage', 'summary', period, tz],
     queryFn: () => fetchT3Summary(period, tz, false),
-    staleTime: 60_000,
+    staleTime: 10_000,
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: 'always',
   })
+
+/** Subscribes to real-time T3 Code usage & provider rate-limit push events from the member agent. */
+export function useLiveT3Usage() {
+  const qc = useQueryClient()
+  const invalidate = () => void qc.invalidateQueries({ queryKey: ['t3-usage'] })
+  useTopic('t3-usage', invalidate, invalidate)
+}

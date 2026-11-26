@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import {
@@ -32,6 +32,7 @@ import {
   providerLabel,
   t3UsageLimitsQuery,
   t3UsageSummaryQuery,
+  useLiveT3Usage,
   type AggregatedModelRow,
   type T3LimitAccount,
   type T3LimitWindow,
@@ -51,7 +52,18 @@ const PERIOD_LABELS: Record<T3UsagePeriod, string> = {
   quarter: '90d',
 }
 
+function formatLiveAge(iso: string | null | undefined, nowMs: number): string | null {
+  if (!iso) return null
+  const ts = Date.parse(iso)
+  if (!Number.isFinite(ts)) return null
+  const sec = Math.max(0, Math.floor((nowMs - ts) / 1000))
+  if (sec < 5) return 'just now'
+  if (sec < 60) return `${sec}s ago`
+  return relativeTime(Math.floor(ts / 1000))
+}
+
 export function T3UsagePage() {
+  useLiveT3Usage()
   const search = useSearch({ from: '/app/usage' })
   const navigate = useNavigate()
   const qc = useQueryClient()
@@ -66,7 +78,7 @@ export function T3UsagePage() {
   const [nowMs, setNowMs] = useState(() => Date.now())
 
   useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 30_000)
+    const id = setInterval(() => setNowMs(Date.now()), 10_000)
     return () => clearInterval(id)
   }, [])
 
@@ -95,6 +107,7 @@ export function T3UsagePage() {
     mutationFn: () => unwrap(api.api.claude.t3.usage.limits.$get({ query: { refresh: 'true' } })),
     onSuccess: (data) => {
       qc.setQueryData(t3UsageLimitsQuery().queryKey, data)
+      setNowMs(Date.now())
       toast.success('T3 Code limits refreshed')
     },
     onError: (err) => toast.error(err.message),
@@ -104,6 +117,7 @@ export function T3UsagePage() {
     mutationFn: () => unwrap(api.api.claude.t3.usage.summary.$get({ query: { period, tz, refresh: 'true' } })),
     onSuccess: (data) => {
       qc.setQueryData(t3UsageSummaryQuery(period, tz).queryKey, data)
+      setNowMs(Date.now())
       toast.success('T3 Code usage & prices refreshed')
     },
     onError: (err) => toast.error(err.message),
@@ -141,64 +155,99 @@ export function T3UsagePage() {
     ? (limitsQ.isPending ? true : limitsQ.data?.connected !== false)
     : (summaryQ.isPending ? true : summaryQ.data?.connected !== false)
 
+  const isLiveSyncing = tab === 'limits'
+    ? Boolean(refreshLimits.isPending || limitsQ.data?.refreshing || (limitsQ.isFetching && !limitsQ.isPending))
+    : Boolean(refreshSummary.isPending || (summaryQ.isFetching && !summaryQ.isPending))
+
+  const lastUpdatedText = formatLiveAge(
+    tab === 'limits' ? limitsQ.data?.checkedAt : summaryQ.data?.readAt,
+    nowMs,
+  )
+
   return (
     <>
       <PageHeader
         title="Usage"
         actions={
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1 sm:gap-1.5">
             {tab === 'limits' ? (
               <Button
-                size="sm"
+                size="icon-sm"
                 variant="outline"
+                className="sm:h-7 sm:w-auto sm:px-3"
                 disabled={refreshLimits.isPending || limitsQ.isPending || !activeConnected}
                 onClick={() => refreshLimits.mutate()}
+                aria-label="Refresh limits"
+                title="Refresh limits"
               >
-                <RotateCw className={cn(refreshLimits.isPending && 'animate-spin')} />
+                <RotateCw className={cn((refreshLimits.isPending || limitsQ.data?.refreshing) && 'animate-spin')} />
                 <span className="hidden sm:inline">Refresh limits</span>
               </Button>
             ) : (
               <>
                 <Button
-                  size="sm"
+                  size="icon-sm"
                   variant="outline"
+                  className="sm:h-7 sm:w-auto sm:px-3"
                   disabled={summaryQ.isPending || !activeConnected}
                   onClick={() => openPricesFor()}
+                  aria-label="Model prices"
+                  title="Model prices"
                 >
                   <SlidersHorizontal />
                   <span className="hidden sm:inline">Model prices</span>
                 </Button>
                 <Button
-                  size="sm"
+                  size="icon-sm"
                   variant="outline"
+                  className="sm:h-7 sm:w-auto sm:px-3"
                   disabled={refreshSummary.isPending || summaryQ.isPending || !activeConnected}
                   onClick={() => refreshSummary.mutate()}
+                  aria-label="Refresh usage"
+                  title="Refresh usage"
                 >
                   <RotateCw className={cn(refreshSummary.isPending && 'animate-spin')} />
                   <span className="hidden sm:inline">Refresh</span>
                 </Button>
               </>
             )}
-            <Button variant="ghost" size="icon" asChild aria-label="Agent setup" title="Agent setup">
+            <Button variant="ghost" size="icon-sm" asChild aria-label="Agent setup" title="Agent setup">
               <Link to="/sessions/setup"><Settings2 /></Link>
             </Button>
           </div>
         }
       />
 
-      <PageBody className="gap-8 py-6 md:py-8">
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+      <PageBody className="gap-5 py-4 sm:gap-8 sm:py-6 md:py-8">
+        <div className="flex flex-col gap-3 sm:gap-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm text-muted-foreground">
               <span className="inline-flex items-center gap-1.5 rounded-full bg-surface px-2.5 py-0.5 text-xs font-medium text-foreground">
                 <Gauge className="size-3.5 text-muted-foreground" />
                 T3 Code only
               </span>
-              <span>Rate limits, processed tokens, and model pricing from your T3 Code instance.</span>
+              {activeConnected && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-surface px-2.5 py-0.5 text-xs tabular-nums text-muted-foreground">
+                  {isLiveSyncing ? (
+                    <>
+                      <RotateCw className="size-3 animate-spin text-foreground/80" />
+                      <span>Syncing live…</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" aria-hidden />
+                      <span>Live{lastUpdatedText ? ` · ${lastUpdatedText}` : ''}</span>
+                    </>
+                  )}
+                </span>
+              )}
+              <span className="hidden md:inline">
+                Rate limits, processed tokens, and model pricing from your T3 Code instance.
+              </span>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-3">
             <ToggleGroup
               type="single"
               spacing={1}
@@ -207,13 +256,13 @@ export function T3UsagePage() {
               aria-label="Usage section"
               className="w-full rounded-full bg-surface p-1 sm:w-fit"
             >
-              <ToggleGroupItem value="limits" className="min-w-fit flex-1 rounded-full px-4 hover:bg-surface-2 sm:flex-initial">
+              <ToggleGroupItem value="limits" className="h-8 flex-1 rounded-full px-3 text-xs hover:bg-surface-2 sm:h-7 sm:flex-initial sm:px-4 sm:text-sm">
                 Limits
               </ToggleGroupItem>
-              <ToggleGroupItem value="tokens" className="min-w-fit flex-1 rounded-full px-4 hover:bg-surface-2 sm:flex-initial">
+              <ToggleGroupItem value="tokens" className="h-8 flex-1 rounded-full px-3 text-xs hover:bg-surface-2 sm:h-7 sm:flex-initial sm:px-4 sm:text-sm">
                 Tokens
               </ToggleGroupItem>
-              <ToggleGroupItem value="price" className="min-w-fit flex-1 rounded-full px-4 hover:bg-surface-2 sm:flex-initial">
+              <ToggleGroupItem value="price" className="h-8 flex-1 rounded-full px-3 text-xs hover:bg-surface-2 sm:h-7 sm:flex-initial sm:px-4 sm:text-sm">
                 Price
               </ToggleGroupItem>
             </ToggleGroup>
@@ -228,7 +277,11 @@ export function T3UsagePage() {
                 className="w-full rounded-full bg-surface p-1 sm:w-fit"
               >
                 {(['day', 'week', 'month', 'quarter'] as const).map((p) => (
-                  <ToggleGroupItem key={p} value={p} className="min-w-fit flex-1 rounded-full px-3.5 hover:bg-surface-2 sm:flex-initial">
+                  <ToggleGroupItem
+                    key={p}
+                    value={p}
+                    className="h-8 flex-1 rounded-full px-2.5 text-xs tabular-nums hover:bg-surface-2 sm:h-7 sm:flex-initial sm:px-3.5 sm:text-sm"
+                  >
                     {PERIOD_LABELS[p]}
                   </ToggleGroupItem>
                 ))}
@@ -237,12 +290,16 @@ export function T3UsagePage() {
           </div>
 
           {tab !== 'limits' && agg.allProviders.length > 1 && (
-            <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter T3 Code providers">
+            <div
+              className="-mx-4 flex items-center gap-1.5 overflow-x-auto px-4 py-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0"
+              role="group"
+              aria-label="Filter T3 Code providers"
+            >
               <button
                 type="button"
                 onClick={() => setHiddenProviders(new Set())}
                 className={cn(
-                  'rounded-full px-3 py-1 text-xs font-medium transition-colors',
+                  'shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 sm:py-1 text-xs font-medium transition-colors',
                   hiddenProviders.size === 0 ? 'bg-foreground text-background' : 'bg-surface text-muted-foreground hover:bg-surface-2 hover:text-foreground',
                 )}
               >
@@ -256,7 +313,7 @@ export function T3UsagePage() {
                     type="button"
                     onClick={() => toggleProvider(p)}
                     className={cn(
-                      'inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-colors',
+                      'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 sm:py-1 text-xs font-medium transition-colors',
                       active ? 'bg-surface-2 text-foreground ring-1 ring-border' : 'bg-surface text-muted-foreground opacity-60 hover:opacity-100',
                     )}
                   >
@@ -270,20 +327,20 @@ export function T3UsagePage() {
         </div>
 
         {!activeConnected ? (
-          <div className="flex flex-col items-start gap-4 rounded-2xl bg-surface p-6 md:p-8">
+          <div className="flex flex-col items-start gap-4 rounded-2xl bg-surface p-5 sm:p-6 md:p-8">
             <div className="flex max-w-prose flex-col gap-1.5">
-              <h2 className="text-lg font-semibold tracking-[-0.015em]">Connect T3 Code to view usage</h2>
+              <h2 className="text-base sm:text-lg font-semibold tracking-[-0.015em]">Connect T3 Code to view usage</h2>
               <p className="text-sm text-pretty text-muted-foreground">
                 {(tab === 'limits' ? limitsQ.data?.error : summaryQ.data?.error)
                   || 'Usage reads rate limits, token history, and model costs directly from your personal T3 Code service.'}
               </p>
             </div>
-            <div className="flex flex-wrap gap-2">
-              <Button disabled={connectT3.isPending} onClick={() => connectT3.mutate()}>
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap">
+              <Button className="w-full sm:w-auto" disabled={connectT3.isPending} onClick={() => connectT3.mutate()}>
                 {connectT3.isPending ? <Spinner /> : <Plug />}
                 Connect T3 Code
               </Button>
-              <Button variant="outline" asChild>
+              <Button className="w-full sm:w-auto" variant="outline" asChild>
                 <Link to="/sessions/setup">Agent setup</Link>
               </Button>
             </div>
@@ -375,7 +432,7 @@ function LimitsSection({
   if (error) return <ErrorAlert error={error} />
   if (isPending) {
     return (
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-3.5 sm:gap-4 lg:grid-cols-2">
         {[0, 1].map((i) => <Skeleton key={i} className="h-44 rounded-2xl bg-surface" />)}
       </div>
     )
@@ -386,14 +443,14 @@ function LimitsSection({
 
   if (!accounts.length) {
     return (
-      <div className="flex flex-col items-start gap-4 rounded-2xl bg-surface p-6 md:p-8">
+      <div className="flex flex-col items-start gap-4 rounded-2xl bg-surface p-5 sm:p-6 md:p-8">
         <div className="flex max-w-prose flex-col gap-1.5">
-          <h2 className="text-lg font-semibold tracking-[-0.015em]">No T3 Code providers reporting limits yet</h2>
+          <h2 className="text-base sm:text-lg font-semibold tracking-[-0.015em]">No T3 Code providers reporting limits yet</h2>
           <p className="text-sm text-pretty text-muted-foreground">
-            Pair T3 Code to sign in to providers such as Antigravity, Codex, Claude, or OpenCode, then refresh limits.
+            Pair T3 Code to sign in to providers such as Antigravity, Codex, Claude, or OpenCode, then limits stream live automatically.
           </p>
         </div>
-        <Button onClick={onPair}>Pair T3 app</Button>
+        <Button className="w-full sm:w-auto" onClick={onPair}>Pair T3 app</Button>
       </div>
     )
   }
@@ -414,18 +471,19 @@ function LimitsSection({
   }
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-5 sm:gap-6">
       {withWindows.length > 0 && (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid gap-3.5 sm:gap-4 lg:grid-cols-2">
           {withWindows.map((acc) => {
             const color = providerColor(acc.driver, acc.accentColor)
+            const checkedAge = formatLiveAge(acc.checkedAt, nowMs)
             return (
-              <section key={acc.id} className="flex flex-col gap-4 rounded-2xl bg-surface p-4 md:p-5">
-                <header className="flex items-start justify-between gap-3">
+              <section key={acc.id} className="flex flex-col gap-3.5 sm:gap-4 rounded-2xl bg-surface p-4 md:p-5">
+                <header className="flex flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
                   <div className="flex min-w-0 items-center gap-2.5">
                     <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
                         <h2 className="truncate font-semibold tracking-[-0.01em]">{acc.label}</h2>
                         {acc.sourceLabel && (
                           <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-muted-foreground">
@@ -440,20 +498,22 @@ function LimitsSection({
                       )}
                     </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
-                    {acc.checkedAt && <span>Checked {relativeTime(Math.floor(Date.parse(acc.checkedAt) / 1000))}</span>}
-                    {acc.externalUsage && (
-                      <a
-                        href={acc.externalUsage.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1 text-foreground hover:underline"
-                      >
-                        {acc.externalUsage.label}
-                        <ExternalLink className="size-3" />
-                      </a>
-                    )}
-                  </div>
+                  {(checkedAge || acc.externalUsage) && (
+                    <div className="flex flex-wrap items-center gap-2 pl-5 text-xs tabular-nums text-muted-foreground sm:shrink-0 sm:pl-0">
+                      {checkedAge && <span>Checked {checkedAge}</span>}
+                      {acc.externalUsage && (
+                        <a
+                          href={acc.externalUsage.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 text-foreground hover:underline"
+                        >
+                          {acc.externalUsage.label}
+                          <ExternalLink className="size-3" />
+                        </a>
+                      )}
+                    </div>
+                  )}
                 </header>
 
                 <div className="flex flex-col gap-3.5">
@@ -463,7 +523,7 @@ function LimitsSection({
                 </div>
 
                 {acc.resetCredits && acc.resetCredits.availableCount > 0 && (
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 text-xs text-muted-foreground">
+                  <div className="flex flex-col gap-2 border-t pt-3 text-xs text-muted-foreground sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
                     <span className="tabular-nums">
                       {acc.resetCredits.availableCount} reset credit{acc.resetCredits.availableCount === 1 ? '' : 's'} banked
                       {acc.resetCredits.nextExpiresAt
@@ -489,6 +549,7 @@ function LimitsSection({
                         <Button
                           size="xs"
                           variant="outline"
+                          className="w-fit"
                           disabled={redeem.isPending}
                           onClick={() => void handleRedeem(acc)}
                         >
@@ -569,7 +630,7 @@ export function LimitWindowRow({
         <span className="truncate font-medium text-foreground">{w.label}</span>
         <span className="shrink-0 tabular-nums text-muted-foreground">
           <span className="font-semibold text-foreground">{remaining}% left</span>
-          {!compact && <span className="ml-1.5 text-[11px]">({used}% used)</span>}
+          {!compact && <span className="hidden xs:inline sm:inline ml-1.5 text-[11px]">({used}% used)</span>}
         </span>
       </div>
       <div
@@ -595,7 +656,7 @@ export function LimitWindowRow({
         )}
       </div>
       {(pace || resetText) && (
-        <div className="flex items-center justify-between gap-2 text-[11px] tabular-nums text-muted-foreground">
+        <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] tabular-nums text-muted-foreground">
           <span>
             {pace ? (
               pace.state === 'ahead'
@@ -605,7 +666,7 @@ export function LimitWindowRow({
                   : 'Steady pace'
             ) : ''}
           </span>
-          {resetText && <span>{resetText}</span>}
+          {resetText && <span className="ml-auto">{resetText}</span>}
         </div>
       )}
     </div>
@@ -638,12 +699,12 @@ function TokensSection({
   const modelsByTokens = [...agg.models].sort((a, b) => b.totalTokens - a.totalTokens || b.costUsd - a.costUsd)
 
   return (
-    <div className="flex flex-col gap-8">
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="flex flex-col gap-5 sm:gap-8">
+      <div className="grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
         <MetricCard
           label="Processed tokens"
           value={formatCompactTokens(agg.totalTokens)}
-          sub={`${formatInt(agg.totalTokens)} total · ${formatInt(agg.sessions)} session${agg.sessions === 1 ? '' : 's'}`}
+          sub={`${formatInt(agg.sessions)} session${agg.sessions === 1 ? '' : 's'} · ${formatInt(agg.totalTokens)} tok`}
         />
         <MetricCard
           label="Cache hit rate"
@@ -653,19 +714,19 @@ function TokensSection({
         <MetricCard
           label="Input tokens"
           value={formatCompactTokens(totalInput)}
-          sub={`${formatCompactTokens(agg.uncachedInputTokens)} uncached · ${formatCompactTokens(agg.cacheCreationTokens)} cache write`}
+          sub={`${formatCompactTokens(agg.uncachedInputTokens)} new · ${formatCompactTokens(agg.cacheCreationTokens)} write`}
         />
         <MetricCard
           label="Output tokens"
           value={formatCompactTokens(agg.outputTokens)}
-          sub={agg.reasoningTokens > 0 ? `Includes ${formatCompactTokens(agg.reasoningTokens)} reasoning` : `${formatInt(agg.records)} usage records`}
+          sub={agg.reasoningTokens > 0 ? `${formatCompactTokens(agg.reasoningTokens)} reasoning` : `${formatInt(agg.records)} records`}
         />
       </div>
 
-      <section className="flex flex-col gap-3 rounded-2xl bg-surface p-4 md:p-5">
+      <section className="flex flex-col gap-3 rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
-            <h2 className="text-base font-semibold tracking-[-0.01em]">
+            <h2 className="text-sm sm:text-base font-semibold tracking-[-0.01em]">
               {resolution === 'hour' ? 'Hourly processed tokens' : 'Daily processed tokens'}
             </h2>
             <p className="text-xs text-muted-foreground">
@@ -680,9 +741,9 @@ function TokensSection({
         />
       </section>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <section className="flex flex-col gap-3 rounded-2xl bg-surface p-4 md:p-5">
-          <h2 className="text-base font-semibold tracking-[-0.01em]">Tokens by type</h2>
+      <div className="grid gap-3.5 sm:gap-4 lg:grid-cols-2">
+        <section className="flex flex-col gap-3 rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
+          <h2 className="text-sm sm:text-base font-semibold tracking-[-0.01em]">Tokens by type</h2>
           <dl className="flex flex-col gap-2.5 text-sm">
             <BreakdownRow label="Cached input" value={formatCompactTokens(agg.cachedInputTokens)} detail={formatInt(agg.cachedInputTokens)} share={agg.totalTokens > 0 ? agg.cachedInputTokens / agg.totalTokens : 0} />
             <BreakdownRow label="Uncached input" value={formatCompactTokens(agg.uncachedInputTokens)} detail={formatInt(agg.uncachedInputTokens)} share={agg.totalTokens > 0 ? agg.uncachedInputTokens / agg.totalTokens : 0} />
@@ -731,12 +792,12 @@ function PriceSection({
   const hasSpeedBreakdown = agg.speedCost.fast > 0 || agg.speedCost.ultrafast > 0 || agg.speedCost.premium > 0
 
   return (
-    <div className="flex flex-col gap-8">
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="flex flex-col gap-5 sm:gap-8">
+      <div className="grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
         <MetricCard
-          label="Estimated API cost"
+          label="Estimated cost"
           value={formatUsd(agg.costUsd)}
-          sub={`${formatInt(agg.sessions)} session${agg.sessions === 1 ? '' : 's'} · ${formatCompactTokens(agg.totalTokens)} tokens`}
+          sub={`${formatInt(agg.sessions)} session${agg.sessions === 1 ? '' : 's'} · ${formatCompactTokens(agg.totalTokens)} tok`}
         />
         <MetricCard
           label="Cache savings"
@@ -746,22 +807,22 @@ function PriceSection({
         <MetricCard
           label="Priced coverage"
           value={agg.records > 0 ? formatShare(pricedShare) : '—'}
-          sub={pricing?.knownModels ? `${formatInt(pricing.knownModels)} catalog models (${pricing.status})` : 'T3 Code pricing catalog'}
+          sub={pricing?.knownModels ? `${formatInt(pricing.knownModels)} models (${pricing.status})` : 'T3 pricing catalog'}
         />
         <MetricCard
           label="Unpriced tokens"
           value={formatCompactTokens(agg.costQuality.unpricedTokens)}
-          sub={agg.costQuality.unpricedTokens > 0 ? 'Set custom model prices or aliases' : 'All active models priced'}
+          sub={agg.costQuality.unpricedTokens > 0 ? 'Tap Set to price custom models' : 'All active models priced'}
           action={agg.costQuality.unpricedTokens > 0 ? (
-            <Button size="xs" variant="outline" onClick={() => onEditPrice()}>Set prices</Button>
+            <Button size="xs" variant="outline" onClick={() => onEditPrice()}>Set</Button>
           ) : undefined}
         />
       </div>
 
-      <section className="flex flex-col gap-3 rounded-2xl bg-surface p-4 md:p-5">
+      <section className="flex flex-col gap-3 rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
-            <h2 className="text-base font-semibold tracking-[-0.01em]">
+            <h2 className="text-sm sm:text-base font-semibold tracking-[-0.01em]">
               {resolution === 'hour' ? 'Hourly cost' : 'Daily cost'}
             </h2>
             <p className="text-xs text-muted-foreground">
@@ -776,9 +837,9 @@ function PriceSection({
         />
       </section>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <section className="flex flex-col gap-3 rounded-2xl bg-surface p-4 md:p-5">
-          <h2 className="text-base font-semibold tracking-[-0.01em]">Cost by token type</h2>
+      <div className="grid gap-3.5 sm:gap-4 lg:grid-cols-2">
+        <section className="flex flex-col gap-3 rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
+          <h2 className="text-sm sm:text-base font-semibold tracking-[-0.01em]">Cost by token type</h2>
           <dl className="flex flex-col gap-2.5 text-sm">
             <BreakdownRow label="Uncached input" value={formatUsd(agg.categoryCost.input)} share={agg.costUsd > 0 ? agg.categoryCost.input / agg.costUsd : 0} />
             <BreakdownRow label="Cache read" value={formatUsd(agg.categoryCost.cacheRead)} share={agg.costUsd > 0 ? agg.categoryCost.cacheRead / agg.costUsd : 0} />
@@ -819,16 +880,16 @@ function MetricCard({
   label: string
   value: string
   sub?: string
-  action?: React.ReactNode
+  action?: ReactNode
 }) {
   return (
-    <div className="flex flex-col justify-between gap-2 rounded-2xl bg-surface p-4">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium text-muted-foreground">{label}</span>
+    <div className="flex min-w-0 flex-col justify-between gap-1.5 sm:gap-2 rounded-2xl bg-surface p-3.5 sm:p-4">
+      <div className="flex items-center justify-between gap-1.5">
+        <span className="truncate text-[11px] sm:text-xs font-medium text-muted-foreground">{label}</span>
         {action}
       </div>
-      <div className="text-2xl font-semibold tracking-[-0.02em] tabular-nums">{value}</div>
-      {sub && <div className="text-xs text-muted-foreground tabular-nums">{sub}</div>}
+      <div className="truncate text-xl sm:text-2xl font-semibold tracking-[-0.02em] tabular-nums">{value}</div>
+      {sub && <div className="line-clamp-2 text-[11px] sm:text-xs leading-snug text-muted-foreground tabular-nums">{sub}</div>}
     </div>
   )
 }
@@ -846,8 +907,8 @@ function BreakdownRow({
 }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="flex items-baseline gap-2 tabular-nums">
+      <dt className="truncate text-muted-foreground">{label}</dt>
+      <dd className="flex shrink-0 items-baseline gap-2 tabular-nums">
         {detail && <span className="hidden text-xs text-muted-foreground sm:inline">{detail}</span>}
         {share !== undefined && share > 0 && <span className="text-xs text-muted-foreground">{formatShare(share)}</span>}
         <span className="font-medium text-foreground">{value}</span>
@@ -864,8 +925,8 @@ function ProviderSharePanel({
   providers: ReturnType<typeof aggregateT3Usage>['providers']
 }) {
   return (
-    <section className="flex flex-col gap-3 rounded-2xl bg-surface p-4 md:p-5">
-      <h2 className="text-base font-semibold tracking-[-0.01em]">By provider</h2>
+    <section className="flex flex-col gap-3 rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
+      <h2 className="text-sm sm:text-base font-semibold tracking-[-0.01em]">By provider</h2>
       {providers.length === 0 ? (
         <p className="py-4 text-sm text-muted-foreground">No provider activity in this time window.</p>
       ) : (
@@ -875,15 +936,15 @@ function ProviderSharePanel({
             const color = providerColor(p.provider)
             return (
               <li key={p.provider} className="flex flex-col gap-1.5">
-                <div className="flex items-baseline justify-between gap-2 text-sm">
-                  <span className="flex items-center gap-2 font-medium">
-                    <span className="size-2.5 rounded-full" style={{ backgroundColor: color }} />
-                    {providerLabel(p.provider)}
-                    <span className="text-xs font-normal text-muted-foreground tabular-nums">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-sm">
+                  <span className="flex min-w-0 items-center gap-2 font-medium">
+                    <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+                    <span className="truncate">{providerLabel(p.provider)}</span>
+                    <span className="shrink-0 text-xs font-normal text-muted-foreground tabular-nums">
                       {p.sessions} session{p.sessions === 1 ? '' : 's'}
                     </span>
                   </span>
-                  <span className="tabular-nums">
+                  <span className="ml-auto tabular-nums">
                     <span className="font-medium">{mode === 'price' ? formatUsd(p.costUsd) : formatCompactTokens(p.totalTokens)}</span>
                     <span className="ml-1.5 text-xs text-muted-foreground">
                       ({mode === 'price' ? `${formatCompactTokens(p.totalTokens)} · ${formatShare(share)}` : `${formatUsd(p.costUsd)} · ${formatShare(share)}`})
@@ -917,32 +978,67 @@ function UsageChart({
   providers: string[]
 }) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
+  const barsRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    setHoverIdx(null)
+  }, [series.length, mode])
 
   const valOf = (pt: TimelinePoint) => (mode === 'price' ? pt.costUsd : pt.totalTokens)
   const maxVal = useMemo(() => Math.max(0, ...series.map(valOf)), [series, mode])
 
   if (!series.length || maxVal <= 0) {
     return (
-      <div className="flex h-44 items-center justify-center rounded-xl bg-background/50 text-sm text-muted-foreground">
+      <div className="flex h-36 sm:h-44 items-center justify-center rounded-xl bg-background/50 px-4 text-center text-sm text-muted-foreground">
         No {mode === 'price' ? 'priced usage' : 'token activity'} recorded in this window.
       </div>
     )
+  }
+
+  const pickIndex = (clientX: number): number | null => {
+    const el = barsRef.current
+    if (!el || !series.length) return null
+    const rect = el.getBoundingClientRect()
+    if (rect.width <= 0) return null
+    const ratio = (clientX - rect.left) / rect.width
+    return Math.min(series.length - 1, Math.max(0, Math.floor(ratio * series.length)))
+  }
+
+  const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const idx = pickIndex(e.clientX)
+    if (idx === null) return
+    if (e.pointerType !== 'mouse' && hoverIdx === idx) {
+      setHoverIdx(null)
+      return
+    }
+    setHoverIdx(idx)
+  }
+
+  const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.pointerType !== 'mouse' && e.buttons === 0) return
+    const idx = pickIndex(e.clientX)
+    if (idx !== null) setHoverIdx(idx)
+  }
+
+  const handlePointerLeave = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'mouse') setHoverIdx(null)
   }
 
   const activePoint = hoverIdx !== null ? series[hoverIdx] : null
   const firstLabel = series[0]?.label ?? ''
   const midLabel = series[Math.floor(series.length / 2)]?.label ?? ''
   const lastLabel = series[series.length - 1]?.label ?? ''
+  const gapClass = series.length > 45 ? 'gap-px' : series.length > 24 ? 'gap-[2px]' : 'gap-1'
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex min-h-6 flex-wrap items-center justify-between gap-2 text-xs tabular-nums">
+      <div className="flex min-h-9 sm:min-h-6 flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs tabular-nums">
         {activePoint ? (
           <>
             <span className="font-medium text-foreground">
               {activePoint.fullLabel}: {mode === 'price' ? formatUsd(activePoint.costUsd) : `${formatCompactTokens(activePoint.totalTokens)} tokens`}
             </span>
-            <div className="flex flex-wrap items-center gap-3 text-muted-foreground">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-muted-foreground">
               {providers.map((p) => {
                 const pv = activePoint.byProvider[p]
                 const v = mode === 'price' ? pv?.costUsd ?? 0 : pv?.totalTokens ?? 0
@@ -954,18 +1050,32 @@ function UsageChart({
                   </span>
                 )
               })}
+              <button
+                type="button"
+                onClick={() => setHoverIdx(null)}
+                className="sm:hidden text-[11px] font-medium text-foreground/80 underline underline-offset-2"
+              >
+                Reset
+              </button>
             </div>
           </>
         ) : (
           <span className="text-muted-foreground">
             Peak: {mode === 'price' ? formatUsd(maxVal) : `${formatCompactTokens(maxVal)} tokens`}
+            <span className="sm:hidden"> · tap or drag bars</span>
           </span>
         )}
       </div>
 
       <div
-        className="flex h-44 items-end gap-[2px] rounded-xl bg-background/50 px-2 pt-4 pb-1"
-        onMouseLeave={() => setHoverIdx(null)}
+        ref={barsRef}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerLeave={handlePointerLeave}
+        className={cn(
+          'flex h-36 sm:h-44 touch-pan-y select-none items-end rounded-xl bg-background/50 px-2 pt-3 pb-1',
+          gapClass,
+        )}
       >
         {series.map((pt, idx) => {
           const total = valOf(pt)
@@ -974,18 +1084,17 @@ function UsageChart({
           return (
             <div
               key={pt.key}
-              onMouseEnter={() => setHoverIdx(idx)}
               onFocus={() => setHoverIdx(idx)}
               tabIndex={0}
               aria-label={`${pt.fullLabel}: ${mode === 'price' ? formatUsd(pt.costUsd) : `${formatCompactTokens(pt.totalTokens)} tokens`}`}
               className={cn(
                 'group relative flex h-full min-w-0 flex-1 flex-col justify-end rounded-t-xs outline-none transition-opacity',
-                hoverIdx !== null && !isHovered && 'opacity-50',
+                hoverIdx !== null && !isHovered && 'opacity-45',
               )}
             >
               {total > 0 ? (
                 <div
-                  className="flex w-full flex-col overflow-hidden rounded-t-[3px]"
+                  className="flex w-full flex-col overflow-hidden rounded-t-[2px] sm:rounded-t-[3px]"
                   style={{ height: `${Math.max(2, heightPct)}%` }}
                 >
                   {providers.map((p) => {
@@ -1034,9 +1143,9 @@ function ModelsBreakdownTable({
   )
 
   return (
-    <section className="flex flex-col gap-3 rounded-2xl bg-surface p-4 md:p-5">
+    <section className="flex flex-col gap-3 rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-base font-semibold tracking-[-0.01em]">Models breakdown</h2>
+        <h2 className="text-sm sm:text-base font-semibold tracking-[-0.01em]">Models breakdown</h2>
         <span className="text-xs text-muted-foreground tabular-nums">
           {models.length} model{models.length === 1 ? '' : 's'}
         </span>
@@ -1045,45 +1154,169 @@ function ModelsBreakdownTable({
       {models.length === 0 ? (
         <p className="py-6 text-center text-sm text-muted-foreground">No model activity in this window.</p>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b text-xs text-muted-foreground">
-                <th className="py-2 pr-3 text-left font-medium">#</th>
-                <th className="py-2 pr-3 text-left font-medium">Model</th>
-                <th className="py-2 px-3 text-right font-medium">Price</th>
-                <th className="py-2 px-3 text-right font-medium">Share</th>
-                <th className="py-2 pl-3 text-right font-medium">Tokens</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border/50">
-              {models.map((m, idx) => {
-                const open = expandedKey === m.key
-                const metricVal = mode === 'price' ? m.costUsd : m.totalTokens
-                const barPct = maxMetric > 0 ? (metricVal / maxMetric) * 100 : 0
-                const share = mode === 'price' ? m.costShare : m.tokenShare
-                const color = providerColor(m.provider)
-                const inputTotal = m.tokens.uncachedInputTokens + m.tokens.cachedInputTokens + m.tokens.cacheCreationTokens
-                const modelCacheHit = inputTotal > 0 ? m.tokens.cachedInputTokens / inputTotal : 0
+        <>
+          <div className="flex flex-col divide-y divide-border/50 md:hidden">
+            {models.map((m, idx) => {
+              const open = expandedKey === m.key
+              const metricVal = mode === 'price' ? m.costUsd : m.totalTokens
+              const barPct = maxMetric > 0 ? (metricVal / maxMetric) * 100 : 0
+              const share = mode === 'price' ? m.costShare : m.tokenShare
+              const color = providerColor(m.provider)
+              const inputTotal = m.tokens.uncachedInputTokens + m.tokens.cachedInputTokens + m.tokens.cacheCreationTokens
+              const modelCacheHit = inputTotal > 0 ? m.tokens.cachedInputTokens / inputTotal : 0
 
-                return (
-                  <ModelTableRowGroup
-                    key={m.key}
-                    index={idx + 1}
-                    row={m}
-                    open={open}
-                    onToggle={() => setExpandedKey(open ? null : m.key)}
-                    barPct={barPct}
-                    share={share}
-                    color={color}
-                    modelCacheHit={modelCacheHit}
-                    onSetPrice={() => onEditPrice(m.model)}
-                  />
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+              return (
+                <div key={m.key} className="flex flex-col gap-2 py-3 first:pt-1 last:pb-1">
+                  <div className="flex items-start justify-between gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedKey(open ? null : m.key)}
+                      className="flex min-w-0 flex-1 items-start gap-2 text-left"
+                    >
+                      <span className="mt-0.5 text-xs tabular-nums text-muted-foreground">{idx + 1}.</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+                          <span className="truncate font-mono text-xs font-medium text-foreground">{m.model}</span>
+                          {open
+                            ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+                            : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />}
+                        </div>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                          <span>{providerLabel(m.provider)}</span>
+                          <span aria-hidden>·</span>
+                          <span className="tabular-nums">
+                            {mode === 'price'
+                              ? `${formatCompactTokens(m.totalTokens)} tok`
+                              : m.isUnpriced ? 'Unpriced' : formatUsd(m.costUsd)}
+                          </span>
+                          {!(m.isUnpriced && share === 0) && (
+                            <>
+                              <span aria-hidden>·</span>
+                              <span className="tabular-nums">{formatShare(share)}</span>
+                            </>
+                          )}
+                          {m.hasOverride && (
+                            <span className="rounded-full bg-surface-2 px-1.5 py-0.2 text-[10px] font-medium text-foreground">Custom</span>
+                          )}
+                          {m.alias && (
+                            <span className="max-w-36 truncate rounded-full bg-surface-2 px-1.5 py-0.2 text-[10px] text-muted-foreground">→ {m.alias}</span>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+
+                    <div className="shrink-0 text-right tabular-nums">
+                      {mode === 'price' ? (
+                        m.isUnpriced ? (
+                          <Button size="xs" variant="outline" onClick={() => onEditPrice(m.model)}>
+                            Set price
+                          </Button>
+                        ) : (
+                          <span className="text-sm font-semibold text-foreground">{formatUsd(m.costUsd)}</span>
+                        )
+                      ) : (
+                        <div className="flex flex-col items-end gap-1">
+                          <span className="text-sm font-semibold text-foreground">{formatCompactTokens(m.totalTokens)}</span>
+                          {m.isUnpriced && (
+                            <Button size="xs" variant="outline" onClick={() => onEditPrice(m.model)}>
+                              Set price
+                            </Button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {barPct > 0 && (
+                    <div className="h-1 overflow-hidden rounded-full bg-muted">
+                      <div className="h-full rounded-full" style={{ width: `${Math.max(2, barPct)}%`, backgroundColor: color }} />
+                    </div>
+                  )}
+
+                  {open && (
+                    <div className="mt-1 flex flex-col gap-2.5 rounded-xl bg-background/50 p-3 text-xs">
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 tabular-nums">
+                        <div>
+                          <span className="block text-[11px] text-muted-foreground">Cached input</span>
+                          <span className="font-medium">{formatCompactTokens(m.tokens.cachedInputTokens)} ({formatShare(modelCacheHit)})</span>
+                        </div>
+                        <div>
+                          <span className="block text-[11px] text-muted-foreground">Uncached input</span>
+                          <span className="font-medium">{formatCompactTokens(m.tokens.uncachedInputTokens)}</span>
+                        </div>
+                        {m.tokens.cacheCreationTokens > 0 && (
+                          <div>
+                            <span className="block text-[11px] text-muted-foreground">Cache write</span>
+                            <span className="font-medium">{formatCompactTokens(m.tokens.cacheCreationTokens)}</span>
+                          </div>
+                        )}
+                        <div>
+                          <span className="block text-[11px] text-muted-foreground">Output</span>
+                          <span className="font-medium">{formatCompactTokens(m.tokens.outputTokens)}</span>
+                        </div>
+                        {m.tokens.reasoningTokens > 0 && (
+                          <div>
+                            <span className="block text-[11px] text-muted-foreground">Reasoning</span>
+                            <span className="font-medium">{formatCompactTokens(m.tokens.reasoningTokens)}</span>
+                          </div>
+                        )}
+                        <div>
+                          <span className="block text-[11px] text-muted-foreground">Records</span>
+                          <span className="font-medium">{formatInt(m.records)}</span>
+                        </div>
+                      </div>
+                      <Button size="sm" variant="outline" className="w-full" onClick={() => onEditPrice(m.model)}>
+                        <Coins className="size-3.5" />
+                        {m.hasOverride || m.alias ? 'Edit price / alias' : 'Override model price'}
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+
+          <div className="hidden overflow-x-auto md:block">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b text-xs text-muted-foreground">
+                  <th className="py-2 pr-3 text-left font-medium">#</th>
+                  <th className="py-2 pr-3 text-left font-medium">Model</th>
+                  <th className="py-2 px-3 text-right font-medium">Price</th>
+                  <th className="py-2 px-3 text-right font-medium">Share</th>
+                  <th className="py-2 pl-3 text-right font-medium">Tokens</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/50">
+                {models.map((m, idx) => {
+                  const open = expandedKey === m.key
+                  const metricVal = mode === 'price' ? m.costUsd : m.totalTokens
+                  const barPct = maxMetric > 0 ? (metricVal / maxMetric) * 100 : 0
+                  const share = mode === 'price' ? m.costShare : m.tokenShare
+                  const color = providerColor(m.provider)
+                  const inputTotal = m.tokens.uncachedInputTokens + m.tokens.cachedInputTokens + m.tokens.cacheCreationTokens
+                  const modelCacheHit = inputTotal > 0 ? m.tokens.cachedInputTokens / inputTotal : 0
+
+                  return (
+                    <ModelTableRowGroup
+                      key={m.key}
+                      index={idx + 1}
+                      row={m}
+                      open={open}
+                      onToggle={() => setExpandedKey(open ? null : m.key)}
+                      barPct={barPct}
+                      share={share}
+                      color={color}
+                      modelCacheHit={modelCacheHit}
+                      onSetPrice={() => onEditPrice(m.model)}
+                    />
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </section>
   )
@@ -1194,12 +1427,12 @@ function WarningsFooter({ warnings }: { warnings: string[] }) {
 
 function UsageLoadingSkeleton() {
   return (
-    <div className="flex flex-col gap-6">
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="flex flex-col gap-5 sm:gap-6">
+      <div className="grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
         {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-24 rounded-2xl bg-surface" />)}
       </div>
-      <Skeleton className="h-64 rounded-2xl bg-surface" />
-      <div className="grid gap-4 lg:grid-cols-2">
+      <Skeleton className="h-56 sm:h-64 rounded-2xl bg-surface" />
+      <div className="grid gap-3.5 sm:gap-4 lg:grid-cols-2">
         <Skeleton className="h-48 rounded-2xl bg-surface" />
         <Skeleton className="h-48 rounded-2xl bg-surface" />
       </div>
@@ -1337,7 +1570,7 @@ function ModelPricesDialog({
       title="T3 Code model prices"
       description="Override per-1M-token USD prices or map custom model IDs to catalog models in your T3 Code settings."
     >
-      <div className="flex flex-col gap-5 pb-2 text-sm">
+      <div className="flex flex-col gap-4 sm:gap-5 pb-2 text-sm">
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-surface px-3.5 py-2.5 text-xs">
           <span className="text-muted-foreground">
             Catalog: <span className="font-medium text-foreground">{formatInt(pricing.knownModels)} models</span> ({pricing.status})
@@ -1383,7 +1616,7 @@ function ModelPricesDialog({
               placeholder="e.g. gemini-4-carbon"
               value={modelName}
               onChange={(e) => setModelName(e.target.value)}
-              className="font-mono text-xs"
+              className="h-10 sm:h-8 font-mono text-base md:text-xs"
             />
             <datalist id="t3-seen-models">
               {models.map((m) => <option key={m.key} value={m.model} />)}
@@ -1397,11 +1630,13 @@ function ModelPricesDialog({
             onValueChange={(v) => v && setMode(v as 'rate' | 'alias')}
             className="w-full rounded-full bg-background p-1"
           >
-            <ToggleGroupItem value="rate" className="flex-1 rounded-full text-xs">
-              <DollarSign className="size-3.5" />Custom $/1M tokens
+            <ToggleGroupItem value="rate" className="min-w-0 flex-1 rounded-full px-2 text-xs">
+              <DollarSign className="size-3.5 shrink-0" />
+              <span className="truncate">Custom $/1M</span>
             </ToggleGroupItem>
-            <ToggleGroupItem value="alias" className="flex-1 rounded-full text-xs">
-              <Layers className="size-3.5" />Map to catalog model
+            <ToggleGroupItem value="alias" className="min-w-0 flex-1 rounded-full px-2 text-xs">
+              <Layers className="size-3.5 shrink-0" />
+              <span className="truncate">Catalog alias</span>
             </ToggleGroupItem>
           </ToggleGroup>
 
@@ -1409,19 +1644,19 @@ function ModelPricesDialog({
             <div className="grid grid-cols-2 gap-2.5">
               <Field>
                 <FieldLabel htmlFor="t3-rate-in">Input ($ / 1M)</FieldLabel>
-                <Input id="t3-rate-in" type="number" step="any" min="0" placeholder="2.50" value={inputRate} onChange={(e) => setInputRate(e.target.value)} />
+                <Input id="t3-rate-in" type="number" inputMode="decimal" step="any" min="0" placeholder="2.50" value={inputRate} onChange={(e) => setInputRate(e.target.value)} className="h-10 sm:h-8" />
               </Field>
               <Field>
                 <FieldLabel htmlFor="t3-rate-out">Output ($ / 1M)</FieldLabel>
-                <Input id="t3-rate-out" type="number" step="any" min="0" placeholder="10.00" value={outputRate} onChange={(e) => setOutputRate(e.target.value)} />
+                <Input id="t3-rate-out" type="number" inputMode="decimal" step="any" min="0" placeholder="10.00" value={outputRate} onChange={(e) => setOutputRate(e.target.value)} className="h-10 sm:h-8" />
               </Field>
               <Field>
                 <FieldLabel htmlFor="t3-rate-cr">Cache read ($ / 1M)</FieldLabel>
-                <Input id="t3-rate-cr" type="number" step="any" min="0" placeholder="Optional" value={cacheReadRate} onChange={(e) => setCacheReadRate(e.target.value)} />
+                <Input id="t3-rate-cr" type="number" inputMode="decimal" step="any" min="0" placeholder="Optional" value={cacheReadRate} onChange={(e) => setCacheReadRate(e.target.value)} className="h-10 sm:h-8" />
               </Field>
               <Field>
                 <FieldLabel htmlFor="t3-rate-cw">Cache write ($ / 1M)</FieldLabel>
-                <Input id="t3-rate-cw" type="number" step="any" min="0" placeholder="Optional" value={cacheWriteRate} onChange={(e) => setCacheWriteRate(e.target.value)} />
+                <Input id="t3-rate-cw" type="number" inputMode="decimal" step="any" min="0" placeholder="Optional" value={cacheWriteRate} onChange={(e) => setCacheWriteRate(e.target.value)} className="h-10 sm:h-8" />
               </Field>
             </div>
           ) : (
@@ -1432,14 +1667,14 @@ function ModelPricesDialog({
                 placeholder="e.g. gemini-2.5-pro or claude-sonnet-4-5"
                 value={aliasTarget}
                 onChange={(e) => setAliasTarget(e.target.value)}
-                className="font-mono text-xs"
+                className="h-10 sm:h-8 font-mono text-base md:text-xs"
               />
               <FieldDescription>Uses T3 Code’s live catalog rates for that model.</FieldDescription>
             </Field>
           )}
 
           <div className="flex justify-end">
-            <Button type="submit" size="sm" disabled={!modelName.trim() || savePricing.isPending}>
+            <Button type="submit" size="sm" className="w-full sm:w-auto" disabled={!modelName.trim() || savePricing.isPending}>
               {savePricing.isPending ? <Spinner /> : <Plus />}Save rule
             </Button>
           </div>
@@ -1463,9 +1698,9 @@ function ModelPricesDialog({
                       </span>
                     </button>
                     <Button
-                      size="icon"
+                      size="icon-sm"
                       variant="ghost"
-                      className="size-7 text-muted-foreground hover:text-destructive"
+                      className="text-muted-foreground hover:text-destructive"
                       disabled={savePricing.isPending}
                       onClick={() => removeEntry(k)}
                       aria-label={`Reset ${k} to automatic`}

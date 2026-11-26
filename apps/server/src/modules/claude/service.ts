@@ -518,6 +518,7 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
   }
 
   hub.authorize('sessions', () => true)
+  hub.authorize('t3-usage', () => true)
   hub.authorize('session', (u, topic) => {
     const s = repo.byId(topic.slice('session:'.length))
     return !!s && canView(u, s)
@@ -529,6 +530,9 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
     if (ev.ev === 'snapshot') {
       void backfillTitles(username)
       return reconcile(username, ev.sessions as { id: string; mode: string; status?: SessionStatus; remote?: string | null; tasks?: Task[] }[])
+    }
+    if (ev.ev === 't3.usage') {
+      return hub.publish('t3-usage', { type: 'updated' }, (u) => u.username === username)
     }
     const s = typeof ev.id === 'string' ? repo.byId(ev.id) : undefined
     if (!s || s.owner_username !== username) return
@@ -549,6 +553,7 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
         if (st === 'error') alert(s, 'errors', `${nameOf(s)} stopped with an error: ${s.title}`, typeof ev.detail === 'string' ? clip(ev.detail) : undefined)
         else if (s.mode === 'cli' && st === 'waiting' && s.status !== 'waiting') alert(s, 'needs_you', `${nameOf(s)} needs you: ${s.title}`, 'Waiting for you in the CLI')
         if (s.mode === 'cli' && s.status === 'working' && (st === 'idle' || st === 'stopped')) turnEnded({ session: s, ok: true, aborted: false, result: null, costUsd: 0 })
+        if (s.harness === 't3code') hub.publish('t3-usage', { type: 'session', status: st }, (u) => u.username === username)
         return publish(s.id)
       }
       case 'claude.context': {
@@ -1448,6 +1453,7 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
       agents.request<{
         connected: boolean
         checkedAt: string
+        refreshing?: boolean
         accounts: {
           id: string
           instanceId: string | null

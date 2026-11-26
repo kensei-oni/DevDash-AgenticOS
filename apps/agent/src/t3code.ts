@@ -19,8 +19,8 @@ import {
   type SupervisorTarget,
 } from './t3-supervisor.ts'
 import { T3Client, configPath, readConfig, type T3CallOptions } from './t3-client.ts'
-import { closeUsageClient, consumeResetCredit, getUsageLimits, getUsageSummary, refreshUsageRates, revokeUsageSession, saveUsagePricing } from './t3-usage.ts'
-export { consumeResetCredit, getUsageLimits, getUsageSummary, refreshUsageRates, saveUsagePricing }
+import { closeUsageClient, consumeResetCredit, getUsageLimits, getUsageSummary, nudgeUsageRefresh, refreshUsageRates, revokeUsageSession, saveUsagePricing, setUsageEmitter } from './t3-usage.ts'
+export { consumeResetCredit, getUsageLimits, getUsageSummary, nudgeUsageRefresh, refreshUsageRates, saveUsagePricing, setUsageEmitter }
 
 type Model = { id: string; label?: string | null; options?: { id: string; values: (string | boolean)[] }[] | null }
 export type Capabilities = {

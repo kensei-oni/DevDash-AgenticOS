@@ -82,7 +82,10 @@ const agentOf = (harness: string) => {
 }
 
 let emit: (ev: Record<string, unknown>) => void = () => {}
-export const setEmitter = (fn: typeof emit) => { emit = fn }
+export const setEmitter = (fn: typeof emit) => {
+  emit = fn
+  t3code.setUsageEmitter(() => emit({ ev: 't3.usage' }))
+}
 
 type Config = { id: string; category?: string; currentValue?: string; options?: { value: string; name?: string; description?: string }[] }
 type Chat = {
@@ -633,6 +636,7 @@ async function runTurns(c: Chat) {
   } finally {
     c.turn = false
     if (!c.pending.size) setStatus(c, c.launch.id, 'idle')
+    if (c.launch.harness === 't3code') t3code.nudgeUsageRefresh()
     endGuest(c)
   }
 }

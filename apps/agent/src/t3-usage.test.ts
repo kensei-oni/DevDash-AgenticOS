@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { memberAuthFetch, memberWsUpgrade } from './t3-local.ts'
-import { buildUsageWindowQuery, closeUsageClient, getUsageLimits, getUsageSummary } from './t3-usage.ts'
+import { buildUsageWindowQuery, closeUsageClient, getUsageLimits, getUsageSummary, setUsageEmitter } from './t3-usage.ts'
 
 test('buildUsageWindowQuery builds 24h hourly and 7d/30d/90d daily T3 usage queries with timezone fallback', () => {
   const fixed = new Date('2026-11-26T19:45:32.900Z')
@@ -29,11 +29,11 @@ test('buildUsageWindowQuery builds 24h hourly and 7d/30d/90d daily T3 usage quer
 
 test('memberAuthFetch and memberWsUpgrade enforce strict loopback paths before touching any socket', async () => {
   assert.throws(
-    () => memberAuthFetch(new URL('http://127.0.0.1:3781/api/other'), { method: 'POST' }),
+    () => memberAuthFetch(new URL('http://127.0.0.1:3781/api/other'), { method: 'POST', headers: {} }),
     /Unsupported local T3 Code auth endpoint/,
   )
   assert.throws(
-    () => memberAuthFetch(new URL('https://example.com/oauth/token'), { method: 'POST' }),
+    () => memberAuthFetch(new URL('https://example.com/oauth/token'), { method: 'POST', headers: {} }),
     /Unsupported local T3 Code auth URL/,
   )
   await assert.rejects(
@@ -46,18 +46,21 @@ test('memberAuthFetch and memberWsUpgrade enforce strict loopback paths before t
   )
 })
 
-test('live member T3 usage RPC fetches limits and token/price summary when running as a connected member', async (t) => {
+test('live member T3 usage RPC fetches limits, streams live refresh notifications, and reads token/price summary', async (t) => {
   if (!process.getuid || process.getuid() < 1000 || process.getuid() >= 65534) {
     t.skip('live member T3 usage test runs as an unprivileged DevDash member')
     return
   }
+  let pushEvents = 0
+  setUsageEmitter(() => { pushEvents += 1 })
   try {
-    const limits = await getUsageLimits({ refresh: false })
+    const limits = await getUsageLimits({ refresh: true })
     if (!limits.connected) {
       t.skip('member does not have an active T3 Code connection')
       return
     }
     assert.ok(Array.isArray(limits.accounts))
+    assert.ok(pushEvents >= 1, 'live usage emitter should fire when limits refresh')
     const summary = await getUsageSummary({ period: 'week', timeZone: 'UTC', refresh: false })
     assert.equal(summary.connected, true)
     assert.equal(summary.resolution, 'day')
@@ -65,6 +68,7 @@ test('live member T3 usage RPC fetches limits and token/price summary when runni
     assert.ok(Array.isArray(summary.sources))
     assert.ok(typeof summary.pricing.knownModels === 'number')
   } finally {
+    setUsageEmitter(null)
     closeUsageClient()
   }
 })
