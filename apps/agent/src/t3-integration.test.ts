@@ -867,6 +867,19 @@ test('T3 receives DevDash non-personal rules on turn 1 without copying personal 
   const sent2 = String(calls.filter((c) => c.name === 't3_thread_send').at(-1)!.args.message)
   assert.equal(sent2, 'follow up')
   await H.stop(l.id)
+
+  // Subagent sessions (originKind === 'subagent') receive their delegated role/instructions on turn 1 only
+  const sub = launch()
+  sub.originKind = 'subagent'
+  sub.instructions = 'SUBAGENT_ROLE_INSTRUCTIONS_FOR_TASK'
+  await turn(sub, 'implement feature X')
+  const subSent1 = String(calls.filter((c) => c.name === 't3_thread_send').at(-1)!.args.message)
+  assert.ok(subSent1.includes('SUBAGENT_ROLE_INSTRUCTIONS_FOR_TASK'), 'subagent receives its role instructions on turn 1')
+  assert.match(subSent1, /\[DevDash workflow [a-f0-9-]{36}\]\nSUBAGENT_ROLE_INSTRUCTIONS_FOR_TASK/)
+  await turn(sub, 'refine edge case')
+  const subSent2 = String(calls.filter((c) => c.name === 't3_thread_send').at(-1)!.args.message)
+  assert.equal(subSent2, 'refine edge case')
+  await H.stop(sub.id)
 })
 
 test('Hamasa and Autopilot invoke only their workflow tools with the current member session', async () => {

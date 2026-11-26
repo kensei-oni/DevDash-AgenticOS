@@ -66,10 +66,14 @@ function setup(existingDb?: Db) {
     },
     async create(u: User, opts: Record<string, unknown>, meta?: Record<string, unknown>) {
       const id = `ses-sub-${nextSes++}`
-      db.prepare("insert into claude_sessions (id, owner_id, title, cwd, harness, profile, status, listed) values (?, ?, ?, ?, ?, ?, 'working', ?)")
-        .run(id, u.id, String(opts.title ?? 'Subagent'), String(opts.cwd ?? ''), String(opts.harness ?? 'claude'), String(opts.profile ?? 'default'), meta?.listed === false ? 0 : 1)
+      const resolvedCwd = opts.worktree && opts.project
+        ? `/srv/devdash/worktrees/${String(opts.project)}/wt-${nextSes}`
+        : String(opts.cwd ?? '')
+      const originKind = (meta?.origin as { kind?: string } | undefined)?.kind ?? null
+      db.prepare("insert into claude_sessions (id, owner_id, title, cwd, harness, profile, status, listed, origin_kind) values (?, ?, ?, ?, ?, ?, 'working', ?, ?)")
+        .run(id, u.id, String(meta?.title ?? opts.title ?? 'Subagent'), resolvedCwd, String(opts.harness ?? 'claude'), String(opts.profile ?? 'default'), meta?.listed === false ? 0 : 1, originKind)
       createdSessions.push({ id, user: u, opts, meta })
-      return { id, title: String(opts.title ?? 'Subagent') }
+      return { id, title: String(meta?.title ?? opts.title ?? 'Subagent'), cwd: resolvedCwd }
     },
     async send(_u: User, sessionId: string, text: string) {
       sentMessages.push({ sessionId, text })
@@ -436,4 +440,116 @@ test('deduplicates repeated activity steps and reopens a finished run on native 
   const finished = service.getRun(ann, run.id)
   assert.equal(finished.status, 'completed')
   assert.equal(finished.result, 'Follow-up answer.')
+})
+
+
+test('general-purpose subagents: delegate ad-hoc without saved presets, parallel batch in worktrees, multi-turn send, and subagent_create', async () => {
+  const { db, service, rpcs, createdSessions, sentMessages, transcripts, emitTurnEnd } = setup()
+  const ann = user(1, 'ann', 'Ann Lee')
+
+  db.prepare("insert into projects (id, slug, name, created_by) values (1, 'webapp', 'Web App', 1)").run()
+  db.prepare("insert into claude_sessions (id, owner_id, title, cwd, project_id, harness, profile, status, origin_kind) values ('main-ses', 1, 'Feature work', '/srv/devdash/projects/webapp', 1, 't3code', 'default', 'working', null)").run()
+
+  // Even with 0 saved subagents, generalAvailable is true
+  const list0 = rpcs.get('mcp.subagents_list')!('ann', { sessionId: 'main-ses', args: {} }) as { generalAvailable: boolean; subagents: unknown[] }
+  assert.equal(list0.generalAvailable, true)
+  assert.equal(list0.subagents.length, 0)
+
+  // 1) Ad-hoc general delegation with custom role, instructions, and isolated git worktree
+  const delPromise = Promise.resolve(rpcs.get('mcp.subagent_delegate')!('ann', {
+    sessionId: 'main-ses',
+    args: {
+      task: 'Implement pagination in /api/items and run unit tests',
+      role: 'Backend Builder',
+      instructions: 'Keep backward compatibility when cursor is omitted.',
+      worktree: true,
+      wait: true,
+      timeout_sec: 10,
+    },
+  }))
+  await new Promise((r) => setTimeout(r, 15))
+  const genRun = service.overview(ann).activeRuns[0]!
+  assert.equal(genRun.subagentId, null)
+  assert.equal(genRun.subagentSlug, 'general')
+  assert.equal(genRun.subagentName, 'Backend Builder')
+  assert.match(genRun.cwd ?? '', /^\/srv\/devdash\/worktrees\/webapp\/wt-/)
+  assert.equal(createdSessions.at(-1)!.opts.worktree, true)
+  assert.equal((createdSessions.at(-1)!.meta?.origin as { kind?: string })?.kind, 'subagent')
+  assert.equal(createdSessions.at(-1)!.meta?.shared, false)
+
+  transcripts.set(genRun.sessionId!, [
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'Implemented cursor pagination and 6 tests pass.' }] } },
+  ])
+  emitTurnEnd(genRun.sessionId!, { costUsd: 0.005 })
+
+  const delRes = await delPromise as { runId: number; status: string; cwd: string; result: string }
+  assert.equal(delRes.status, 'completed')
+  assert.match(delRes.cwd, /^\/srv\/devdash\/worktrees\/webapp\/wt-/)
+  assert.match(delRes.result, /cursor pagination/)
+
+  // 2) Multi-turn follow-up via mcp.subagent_send preserves session & waits for updated reply
+  const sendPromise = Promise.resolve(rpcs.get('mcp.subagent_send')!('ann', {
+    sessionId: 'main-ses',
+    args: {
+      run_id: delRes.runId,
+      message: 'Also clamp limit to max 100 and re-run tests.',
+      wait: true,
+      timeout_sec: 10,
+    },
+  }))
+  await new Promise((r) => setTimeout(r, 15))
+  assert.equal(sentMessages.at(-1)!.sessionId, genRun.sessionId)
+  // Sending again while running is rejected cleanly
+  await assert.rejects(
+    () => service.sendToRun(ann, delRes.runId, 'Concurrent send'),
+    /Wait for this subagent run to finish/i,
+  )
+  transcripts.set(genRun.sessionId!, [
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'Clamped limit <= 100; all 8 tests pass.' }] } },
+  ])
+  emitTurnEnd(genRun.sessionId!, { costUsd: 0.003 })
+  const sendRes = await sendPromise as { status: string; result: string }
+  assert.equal(sendRes.status, 'completed')
+  assert.match(sendRes.result, /Clamped limit <= 100/)
+
+  // 3) Parallel fan-out via mcp.subagent_batch
+  const batchPromise = Promise.resolve(rpcs.get('mcp.subagent_batch')!('ann', {
+    sessionId: 'main-ses',
+    args: {
+      tasks: [
+        { task: 'Audit SQL indexes', role: 'DB Auditor' },
+        { task: 'Add API smoke tests', role: 'QA Runner', worktree: true },
+      ],
+      wait: true,
+      timeout_sec: 10,
+    },
+  }))
+  await new Promise((r) => setTimeout(r, 20))
+  const batchActive = service.overview(ann).activeRuns
+  assert.equal(batchActive.length, 2)
+  for (const r of batchActive) {
+    transcripts.set(r.sessionId!, [
+      { type: 'assistant', message: { content: [{ type: 'text', text: `Finished ${r.subagentName}` }] } },
+    ])
+    emitTurnEnd(r.sessionId!, { costUsd: 0.002 })
+  }
+  const batchRes = await batchPromise as { runs: Array<{ name: string; status: string; result: string; cwd: string }> }
+  assert.equal(batchRes.runs.length, 2)
+  assert.ok(batchRes.runs.every((r) => r.status === 'completed'))
+  assert.match(batchRes.runs[1]!.cwd, /worktrees\/webapp/)
+
+  // 4) subagent_run also accepts subagent: "general", and subagent_create saves a reusable preset
+  const quickGen = await rpcs.get('mcp.subagent_run')!('ann', {
+    sessionId: 'main-ses',
+    args: { subagent: 'general', task: 'Check git status', wait: false },
+  }) as { runId: number; subagent: string; status: string }
+  assert.equal(quickGen.subagent, 'general')
+  assert.equal(quickGen.status, 'running')
+  await service.stopRun(ann, quickGen.runId)
+
+  const created = await rpcs.get('mcp.subagent_create')!('ann', {
+    sessionId: 'main-ses',
+    args: { name: 'Security Auditor', instructions: 'Check OWASP issues and auth gates.' },
+  }) as { subagent: { slug: string } }
+  assert.equal(created.subagent.slug, 'security-auditor')
 })

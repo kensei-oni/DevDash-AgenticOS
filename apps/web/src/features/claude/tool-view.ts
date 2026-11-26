@@ -331,7 +331,7 @@ export function shellAction(command: string): Pick<ToolView, 'icon' | 'verb' | '
       case 'touch': return a('write', 'Created a file', 'Creating a file')
       case 'tar': case 'unzip': case 'zip': case 'gzip': case 'gunzip': case '7z':
         return /^(unzip|gunzip)$/.test(cmd) || /^-?\w*x/.test(w[1] ?? '') ? a('files', 'Unpacked', 'Unpacking') : a('files', 'Packed', 'Packing')
-      case 'devdash': return a('plug', 'Managed services', 'Managing services')
+      case 'devdash': return /^subagents?$/.test(w[1] ?? '') ? a('agent', 'Delegated to subagent', 'Delegating to subagent') : a('plug', 'Managed services', 'Managing services')
       case 'systemctl': case 'journalctl': case 'ps': case 'kill': case 'pkill': case 'top': case 'free': case 'df': case 'uptime': return a('task', 'Checked the system', 'Checking the system')
       case 'chmod': case 'chown': return a('files', 'Changed permissions', 'Changing permissions')
       case 'pandoc': case 'libreoffice': case 'soffice': case 'pdftotext': case 'convert': case 'magick': case 'ffmpeg': return a('files', 'Converted', 'Converting')

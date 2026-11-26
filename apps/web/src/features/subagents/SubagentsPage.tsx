@@ -4,7 +4,7 @@ import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import {
   Activity, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Clock,
   ExternalLink, History, Loader2, Pencil, Play, Plus, Sparkles,
-  Square, Trash2, Bot, Zap, SlidersHorizontal, X,
+  Square, Trash2, Bot, Zap, SlidersHorizontal, GitBranch, X,
 } from 'lucide-react'
 import { confirmAction } from '@/components/app/confirm'
 import { NativeSelect } from '@/components/app/native-select'
@@ -70,6 +70,7 @@ export function SubagentsPage() {
     open: false, editing: null, template: null,
   })
   const [runModalSubagent, setRunModalSubagent] = useState<CustomSubagent | null>(null)
+  const [quickDelegateOpen, setQuickDelegateOpen] = useState(false)
   const [showTemplates, setShowTemplates] = useState(false)
 
   // Keep local state in sync when navigated from sidebar/Hamasa indicator links.
@@ -141,11 +142,16 @@ export function SubagentsPage() {
     <>
       <PageHeader
         title="Subagents"
-        description="Custom specialist agents for Hamasa and your sessions, with live activity and run history"
+        description="General-purpose and specialist agents for Hamasa, coding sessions, and CLI — with isolated worktrees and multi-turn steering"
         actions={
-          <Button size="sm" onClick={() => setEditorState({ open: true, editing: null, template: null })}>
-            <Plus />New subagent
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => setQuickDelegateOpen(true)}>
+              <Zap />Quick delegate
+            </Button>
+            <Button size="sm" onClick={() => setEditorState({ open: true, editing: null, template: null })}>
+              <Plus />New subagent
+            </Button>
+          </div>
         }
       />
       <PageBody>
@@ -245,6 +251,11 @@ export function SubagentsPage() {
 
           <TabsContent value="agents" className="flex flex-col gap-6">
             <SubagentDefaultModelCard defaults={subagentDefaults} />
+            <GeneralSubagentCard
+              defaults={subagentDefaults}
+              activeGeneralCount={activeRuns.filter((r) => r.subagentId === null).length}
+              onDelegate={() => setQuickDelegateOpen(true)}
+            />
             {overview.isLoading ? (
               <div className="grid gap-3 md:grid-cols-2">
                 {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-44 rounded-2xl" />)}
@@ -568,6 +579,17 @@ export function SubagentsPage() {
         template={editorState.template}
         subagentDefaults={subagentDefaults}
         onOpenChange={(open) => setEditorState((s) => ({ ...s, open }))}
+      />
+
+      {/* Quick General Delegate Modal */}
+      <QuickDelegateDialog
+        open={quickDelegateOpen}
+        subagentDefaults={subagentDefaults}
+        onOpenChange={setQuickDelegateOpen}
+        onStarted={(runId) => {
+          setQuickDelegateOpen(false)
+          openRun(runId)
+        }}
       />
 
       {/* Run Now Modal */}
@@ -953,6 +975,301 @@ function SubagentEditorDialog({
   )
 }
 
+function GeneralSubagentCard({
+  defaults,
+  activeGeneralCount,
+  onDelegate,
+}: {
+  defaults: SubagentDefaults | undefined
+  activeGeneralCount: number
+  onDelegate: () => void
+}) {
+  const modelTag = shortModelLabel(defaults?.model, defaults?.effort)
+  return (
+    <Card className="flex flex-col gap-3 rounded-2xl border-blue-500/20 bg-blue-500/[0.025] p-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-xl border border-blue-500/25 bg-blue-500/10 text-blue-600 dark:text-blue-400">
+          <Zap className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold">General-Purpose Subagent</span>
+            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">@general</code>
+            <Badge variant="secondary" className="h-5 px-1.5 text-[10px]">Always available</Badge>
+            {modelTag && (
+              <Badge variant="outline" className="h-5 px-1.5 text-[10px]">{modelTag}</Badge>
+            )}
+            {activeGeneralCount > 0 && (
+              <Badge variant="outline" className="h-5 border-emerald-500/30 bg-emerald-500/10 px-1.5 text-[10px] text-emerald-600 dark:text-emerald-400">
+                {activeGeneralCount} running
+              </Badge>
+            )}
+          </div>
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+            Delegate any coding, debugging, testing, shell, or research task ad-hoc — without creating a specialist card first.
+            Available in Hamasa &amp; sessions via <code className="font-mono text-foreground">subagent_delegate</code> / <code className="font-mono text-foreground">subagent_batch</code> / <code className="font-mono text-foreground">subagent_send</code>, or in any terminal via <code className="font-mono text-foreground">devdash subagent delegate &quot;…&quot;</code>.
+          </p>
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-2 pl-12 sm:pl-0">
+        <Button size="xs" onClick={onDelegate}>
+          <Play className="size-3" />Delegate task
+        </Button>
+      </div>
+    </Card>
+  )
+}
+
+function QuickDelegateDialog({
+  open,
+  subagentDefaults,
+  onOpenChange,
+  onStarted,
+}: {
+  open: boolean
+  subagentDefaults: SubagentDefaults | undefined
+  onOpenChange: (open: boolean) => void
+  onStarted: (runId: number) => void
+}) {
+  const qc = useQueryClient()
+  const profiles = useQuery({ ...profilesQuery, enabled: open }).data
+  const projects = useQuery({ ...projectsQuery, enabled: open }).data?.projects ?? []
+
+  const [task, setTask] = useState('')
+  const [role, setRole] = useState('')
+  const [project, setProject] = useState('')
+  const [worktree, setWorktree] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [instructions, setInstructions] = useState('')
+  const [harness, setHarness] = useState<Harness | ''>('')
+  const [profile, setProfile] = useState('default')
+  const [model, setModel] = useState('')
+  const [effort, setEffort] = useState('')
+  const [customModel, setCustomModel] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    setTask('')
+    setRole('')
+    setProject('')
+    setWorktree(false)
+    setShowAdvanced(false)
+    setInstructions('')
+    setHarness('')
+    setProfile('default')
+    setModel('')
+    setEffort('')
+    setCustomModel(false)
+  }, [open])
+
+  const effectiveHarness: Harness = harness || 'claude'
+  const offeredModels = useOfferedModels(profile, effectiveHarness, model || null, open && showAdvanced && !!harness)
+  const agentEntry = profiles?.agents.find((a) => a.harness === harness)
+  const modelsList: ModelInfo[] = offeredModels?.length
+    ? offeredModels
+    : effectiveHarness === 'claude'
+      ? FALLBACK_MODELS
+      : [{ value: '', displayName: 'Default', description: HARNESS[effectiveHarness].defaultModel }]
+
+  const inheritedLabel = useMemo(() => {
+    if (subagentDefaults?.harness) {
+      const h = HARNESS[subagentDefaults.harness]?.label ?? subagentDefaults.harness
+      const m = shortModelLabel(subagentDefaults.model, subagentDefaults.effort)
+      return m ? `${h} · ${m}` : h
+    }
+    return 'Session default'
+  }, [subagentDefaults])
+
+  const start = useMutation({
+    mutationFn: () => unwrap(api.api.subagents.delegate.$post({
+      json: {
+        task: task.trim(),
+        ...(role.trim() ? { role: role.trim() } : {}),
+        ...(instructions.trim() ? { instructions: instructions.trim() } : {}),
+        ...(project ? { project, ...(worktree ? { worktree: true } : {}) } : {}),
+        ...(harness ? {
+          harness,
+          profile: harness === 't3code' ? 'default' : profile,
+          model: model.trim() || null,
+          effort: effort.trim() || null,
+        } : {}),
+      },
+    })),
+    onSuccess: (res) => {
+      toast.success('General subagent started')
+      void qc.invalidateQueries({ queryKey: ['subagents'] })
+      onStarted(res.run.id)
+    },
+    onError: (e) => toast.error(e.message),
+  })
+
+  return (
+    <ResponsiveDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Quick delegate"
+      description="Run a general-purpose subagent on any coding, debugging, testing, shell, or research task right away."
+    >
+      <form
+        className="flex flex-col gap-4"
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (!task.trim()) return
+          start.mutate()
+        }}
+      >
+        <Field>
+          <FieldLabel htmlFor="qd-task">Task</FieldLabel>
+          <Textarea
+            id="qd-task"
+            required
+            rows={4}
+            autoFocus
+            placeholder="Describe what this subagent should build, fix, test, analyze, or search…"
+            value={task}
+            onChange={(e) => setTask(e.target.value)}
+          />
+        </Field>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field>
+            <FieldLabel htmlFor="qd-role">Role label (optional)</FieldLabel>
+            <Input
+              id="qd-role"
+              placeholder="General Subagent"
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+            />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="qd-project">Project (optional)</FieldLabel>
+            <NativeSelect
+              id="qd-project"
+              value={project}
+              onChange={(e) => {
+                setProject(e.target.value)
+                if (!e.target.value) setWorktree(false)
+              }}
+            >
+              <option value="">No specific project (home folder)</option>
+              {projects.filter((p) => !p.archived).map((p) => (
+                <option key={p.slug} value={p.slug}>{p.name} ({p.slug})</option>
+              ))}
+            </NativeSelect>
+          </Field>
+        </div>
+
+        {project && (
+          <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border bg-surface/50 px-3 py-2.5">
+            <div className="flex items-start gap-2.5">
+              <GitBranch className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+              <div>
+                <div className="text-xs font-medium">Isolated git worktree</div>
+                <div className="text-[11px] text-muted-foreground">
+                  Creates a dedicated branch &amp; worktree so parallel code edits don&apos;t collide with your main checkout.
+                </div>
+              </div>
+            </div>
+            <Switch checked={worktree} onCheckedChange={setWorktree} />
+          </label>
+        )}
+
+        <div className="rounded-xl border bg-surface/40">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between px-3 py-2 text-left text-xs font-medium text-muted-foreground hover:text-foreground"
+            onClick={() => setShowAdvanced((v) => !v)}
+          >
+            <span>Custom instructions &amp; model override</span>
+            {showAdvanced ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+          </button>
+          {showAdvanced && (
+            <div className="flex flex-col gap-3 border-t p-3">
+              <Field>
+                <FieldLabel htmlFor="qd-instructions">Extra instructions (optional)</FieldLabel>
+                <Textarea
+                  id="qd-instructions"
+                  rows={3}
+                  placeholder="Optional constraints, conventions, or verification commands…"
+                  value={instructions}
+                  onChange={(e) => setInstructions(e.target.value)}
+                />
+              </Field>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field>
+                  <FieldLabel htmlFor="qd-harness">Agent engine</FieldLabel>
+                  <NativeSelect
+                    id="qd-harness"
+                    value={harness}
+                    onChange={(e) => {
+                      const next = e.target.value as Harness | ''
+                      setHarness(next)
+                      setCustomModel(false)
+                      setModel('')
+                      setEffort('')
+                    }}
+                  >
+                    <option value="">Use subagent default ({inheritedLabel})</option>
+                    {HARNESSES.map((h) => (
+                      <option key={h} value={h}>{HARNESS[h].label}</option>
+                    ))}
+                  </NativeSelect>
+                </Field>
+                {harness && agentEntry && agentEntry.profiles.length > 1 && (
+                  <Field>
+                    <FieldLabel htmlFor="qd-profile">Profile</FieldLabel>
+                    <NativeSelect id="qd-profile" value={profile} onChange={(e) => setProfile(e.target.value)}>
+                      {agentEntry.profiles.map((p) => (
+                        <option key={p.name} value={p.name}>{p.name}</option>
+                      ))}
+                    </NativeSelect>
+                  </Field>
+                )}
+              </div>
+              {harness && (
+                <>
+                  <Field>
+                    <FieldLabel htmlFor="qd-model">Model</FieldLabel>
+                    <ModelField
+                      id="qd-model"
+                      harness={harness}
+                      models={modelsList}
+                      value={model}
+                      custom={customModel}
+                      onCustom={setCustomModel}
+                      onChange={(v) => {
+                        setModel(v)
+                        if (v !== model) setEffort('')
+                      }}
+                      note="Optional per-run model override for this delegated task."
+                    />
+                  </Field>
+                  {harness === 't3code' && (
+                    <ThinkingLevelField
+                      id="qd-effort"
+                      levels={effortLevels(modelsList, model || null)}
+                      value={effort || null}
+                      onChange={(v) => setEffort(v ?? '')}
+                    />
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button type="submit" disabled={start.isPending || !task.trim()}>
+            {start.isPending ? <Loader2 className="size-3.5 animate-spin" /> : <Zap className="size-3.5" />}
+            Delegate now
+          </Button>
+        </div>
+      </form>
+    </ResponsiveDialog>
+  )
+}
+
 function RunSubagentDialog({
   subagent,
   onOpenChange,
@@ -966,18 +1283,20 @@ function RunSubagentDialog({
   const projects = useQuery({ ...projectsQuery, enabled: !!subagent }).data?.projects ?? []
   const [task, setTask] = useState('')
   const [project, setProject] = useState('')
+  const [worktree, setWorktree] = useState(false)
 
   useEffect(() => {
     if (subagent) {
       setTask('')
       setProject(subagent.defaultProject ?? '')
+      setWorktree(false)
     }
   }, [subagent])
 
   const start = useMutation({
     mutationFn: () => unwrap(api.api.subagents[':id'].run.$post({
       param: { id: String(subagent!.id) },
-      json: { task: task.trim(), ...(project ? { project } : {}) },
+      json: { task: task.trim(), ...(project ? { project, ...(worktree ? { worktree: true } : {}) } : {}) },
     })),
     onSuccess: (res) => {
       void qc.invalidateQueries({ queryKey: ['subagents'] })
@@ -1015,13 +1334,34 @@ function RunSubagentDialog({
         </Field>
         <Field>
           <FieldLabel htmlFor="run-project">Project context (optional)</FieldLabel>
-          <NativeSelect id="run-project" value={project} onChange={(e) => setProject(e.target.value)}>
+          <NativeSelect
+            id="run-project"
+            value={project}
+            onChange={(e) => {
+              setProject(e.target.value)
+              if (!e.target.value) setWorktree(false)
+            }}
+          >
             <option value="">No specific project (home folder)</option>
             {projects.filter((p) => !p.archived).map((p) => (
               <option key={p.slug} value={p.slug}>{p.name} ({p.slug})</option>
             ))}
           </NativeSelect>
         </Field>
+        {project && (
+          <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border bg-surface/50 px-3 py-2.5">
+            <div className="flex items-start gap-2.5">
+              <GitBranch className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+              <div>
+                <div className="text-xs font-medium">Isolated git worktree</div>
+                <div className="text-[11px] text-muted-foreground">
+                  Run in a dedicated git worktree so edits stay isolated from the shared checkout.
+                </div>
+              </div>
+            </div>
+            <Switch checked={worktree} onCheckedChange={setWorktree} />
+          </label>
+        )}
         <div className="flex items-center justify-end gap-2">
           <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button type="submit" disabled={start.isPending || !task.trim()}>

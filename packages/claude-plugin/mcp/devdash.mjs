@@ -90,28 +90,102 @@ const netTools = () => call('mcp.net_here', { ...context, args: {} }).then((r) =
 // Custom subagents created by the member on the Subagents page: usable from both Hamasa and normal sessions
 // (never inside a subagent session itself to avoid recursive delegation).
 const SUBAGENT_TOOLS = [
-  { name: 'subagents_list', description: 'List your enabled custom subagents (name, slug, description, instructions preview) and any currently running subagent tasks.', inputSchema: obj({}) },
+  {
+    name: 'subagents_list',
+    description: 'List your subagent defaults, general delegation availability, saved specialist subagents, and currently active subagent runs.',
+    inputSchema: obj({}),
+  },
+  {
+    name: 'subagent_delegate',
+    description: 'Delegate ANY general task (coding, feature implementation, refactoring, debugging, test writing/running, shell commands, codebase exploration, or web research) to an isolated DevDash subagent — no pre-created specialist card required. Supports isolated git worktrees for safe parallel edits and multi-turn follow-ups via subagent_send.',
+    inputSchema: obj({
+      task: { type: 'string', description: 'Clear, self-contained task description (what to do, relevant files/context, and how to verify).' },
+      role: { type: 'string', description: 'Optional role title shown in live activity (e.g. "Backend Builder", "Test Fixer", "General Subagent").' },
+      instructions: { type: 'string', description: 'Optional custom instructions or constraints tailored to this task.' },
+      subagent: { type: 'string', description: 'Optional saved specialist slug from subagents_list if you want to use a preset; omit for a general-purpose subagent.' },
+      project,
+      folder: { type: 'string', description: 'Optional working folder override (defaults to current session folder).' },
+      worktree: { type: 'boolean', description: 'Set true when delegating parallel file edits in a project so this subagent works in its own isolated git worktree (its path is returned in cwd).' },
+      harness: { type: 'string', enum: ['claude', 'opencode', 't3code'], description: 'Optional agent engine override (defaults to your Subagent Defaults).' },
+      model: { type: 'string', description: 'Optional model override.' },
+      effort: { type: 'string', description: 'Optional reasoning/thinking level override.' },
+      wait: { type: 'boolean', description: 'Default true (waits up to timeout_sec and returns result). Set false to launch in background.' },
+      timeout_sec: { type: 'integer', description: 'Seconds to wait when wait=true (default 45, max 50).' },
+    }, ['task']),
+  },
+  {
+    name: 'subagent_batch',
+    description: 'Fan out 1 to 4 independent general or specialist subagent tasks in parallel and collect all results (or background runIds when wait=false). Set worktree=true on tasks that edit files in the same project.',
+    inputSchema: obj({
+      tasks: {
+        type: 'array',
+        description: '1 to 4 tasks to run concurrently.',
+        items: obj({
+          task: { type: 'string', description: 'Task instructions for this subagent.' },
+          role: { type: 'string', description: 'Optional role title (e.g. "API Builder", "Unit Tests").' },
+          instructions: { type: 'string', description: 'Optional custom role instructions.' },
+          subagent: { type: 'string', description: 'Optional saved specialist slug, or omit for general.' },
+          project,
+          folder: { type: 'string', description: 'Optional working folder override.' },
+          worktree: { type: 'boolean', description: 'Isolated git worktree for parallel code edits in a project.' },
+          harness: { type: 'string', enum: ['claude', 'opencode', 't3code'] },
+          model: { type: 'string' },
+          effort: { type: 'string' },
+        }, ['task']),
+      },
+      wait: { type: 'boolean', description: 'Default true (waits for all runs up to timeout_sec). Set false to return run handles immediately.' },
+      timeout_sec: { type: 'integer', description: 'Seconds to wait when wait=true (default 45, max 50).' },
+    }, ['tasks']),
+  },
+  {
+    name: 'subagent_send',
+    description: 'Send a follow-up message or steering instruction to an existing subagent run (preserving its full conversation context, read files, and worktree) and return its updated answer.',
+    inputSchema: obj({
+      run_id: { type: 'integer', description: 'Run id from subagent_delegate, subagent_run, or subagent_batch.' },
+      message: { type: 'string', description: 'Follow-up prompt or refinement for the subagent.' },
+      wait: { type: 'boolean', description: 'Default true (waits up to timeout_sec for the new reply).' },
+      timeout_sec: { type: 'integer', description: 'Seconds to wait when wait=true (default 45, max 50).' },
+    }, ['run_id', 'message']),
+  },
   {
     name: 'subagent_run',
-    description: 'Run one of your custom subagents on a focused task (e.g. web search, codebase search, deep research, code review). Returns the run result (or runId if wait=false or if it continues running in the background).',
+    description: 'Run a saved specialist subagent from subagents_list (or pass subagent="general" for an ad-hoc general subagent).',
     inputSchema: obj({
-      subagent: { type: 'string', description: 'The subagent slug or name from subagents_list.' },
+      subagent: { type: 'string', description: 'Subagent slug or id from subagents_list, or "general" for a general-purpose subagent.' },
       task: { type: 'string', description: 'Clear, self-contained task prompt for the subagent.' },
+      role: { type: 'string', description: 'Optional role title override.' },
+      instructions: { type: 'string', description: 'Optional extra task instructions.' },
       project,
-      cwd: { type: 'string', description: 'Optional working folder override.' },
-      wait: { type: 'boolean', description: 'Default true (waits up to timeout_sec for the answer). Set false to launch in background and check later with subagent_status.' },
+      folder: { type: 'string', description: 'Optional working folder override.' },
+      worktree: { type: 'boolean', description: 'Optional isolated git worktree when running in a project.' },
+      wait: { type: 'boolean', description: 'Default true (waits up to timeout_sec for the answer). Set false to launch in background.' },
       timeout_sec: { type: 'integer', description: 'Seconds to wait when wait=true (default 45, max 50).' },
     }, ['subagent', 'task']),
   },
   {
-    name: 'subagent_status',
-    description: 'Check live status, current activity, recent steps, and result of a subagent run (or list recent runs when run_id is omitted).',
+    name: 'subagent_create',
+    description: 'Save a reusable custom subagent on the Subagents page when the user wants a recurring preset.',
     inputSchema: obj({
-      run_id: { type: 'integer', description: 'Run id returned by subagent_run. Omit to list recent runs.' },
+      name: { type: 'string', description: 'Display name for the subagent.' },
+      instructions: { type: 'string', description: 'System instructions defining what this subagent does and how it works.' },
+      slug: { type: 'string', description: 'Optional URL/CLI slug (auto-generated from name if omitted).' },
+      description: { type: 'string', description: 'Short one-line summary.' },
+      scope: { type: 'string', enum: ['both', 'hamasa', 'sessions'], description: 'Where it appears (default "both").' },
+      harness: { type: 'string', enum: ['claude', 'opencode', 't3code'] },
+      model: { type: 'string' },
+      effort: { type: 'string' },
+      default_project: { type: 'string', description: 'Optional default project slug.' },
+    }, ['name', 'instructions']),
+  },
+  {
+    name: 'subagent_status',
+    description: 'Check live status, current activity, recent steps, cwd, and result of a subagent run (or list recent runs when run_id is omitted).',
+    inputSchema: obj({
+      run_id: { type: 'integer', description: 'Run id returned by subagent_delegate / subagent_run / subagent_batch. Omit to list recent runs.' },
       wait_sec: { type: 'integer', description: 'Optional seconds (1-50) to wait for a running subagent before returning its status.' },
     }),
   },
-  { name: 'subagent_stop', description: 'Stop a currently running custom subagent run.', inputSchema: obj({ run_id: { type: 'integer', description: 'Run id to stop.' } }, ['run_id']) },
+  { name: 'subagent_stop', description: 'Stop a currently running subagent run.', inputSchema: obj({ run_id: { type: 'integer', description: 'Run id to stop.' } }, ['run_id']) },
 ]
 const subagentTools = () => call('mcp.subagents_here', { ...context, args: {} }).then((r) => (r?.available ? SUBAGENT_TOOLS : []), () => [])
 

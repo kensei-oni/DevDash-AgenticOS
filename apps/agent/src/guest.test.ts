@@ -150,7 +150,7 @@ test("teammates' commands run, except what reaches the owner's own things: their
     for (const c of ['gh auth token', 'gh repo delete acme/shop --yes', 'gh api -X DELETE repos/acme/shop', 'git push --force origin main',
       'git push origin +main', 'git push origin :release', 'git push origin --delete old', 'rclone purge drive:shop', 'rclone config show',
       'rclone lsf drive: --config x.conf', 'rclone copy :local:/etc drive:x', 'tailscale funnel 3000', 'crontab -r', 'crontab jobs.txt',
-      'systemctl --user restart shop-worker', 'systemctl --user enable --now shop-worker', 'loginctl enable-linger']) {
+      'systemctl --user restart shop-worker', 'systemctl --user enable --now shop-worker', 'loginctl enable-linger', 'devdash subagent delegate "ship it"']) {
       assert.equal(bash(all, c), false, c)
     }
 

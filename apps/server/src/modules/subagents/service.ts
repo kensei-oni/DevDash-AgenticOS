@@ -48,7 +48,61 @@ export type SubagentTemplate = {
   instructions: string
 }
 
+export const DEFAULT_GENERAL_INSTRUCTIONS = `You are a general-purpose DevDash subagent capable of handling any software engineering, research, debugging, file editing, shell command, testing, or operational task end-to-end.
+- Work autonomously and thoroughly within the target workspace.
+- Verify your changes (typecheck, tests, build, or command output) whenever you modify code or run operations.
+- Cite exact absolute file paths and line numbers when reporting changes or findings.
+- Do not spawn or invoke other DevDash subagents; complete this delegated task directly yourself.
+- Finish with a concise, self-contained summary of what you did, what changed, and any important takeaways.`
+
 export const SUBAGENT_TEMPLATES: SubagentTemplate[] = [
+  {
+    slug: 'general-agent',
+    name: 'General Agent',
+    description: 'Handles any delegated task end-to-end — coding, file edits, shell commands, debugging, or analysis.',
+    icon: 'zap',
+    color: 'blue',
+    scope: 'both',
+    instructions: DEFAULT_GENERAL_INSTRUCTIONS,
+  },
+  {
+    slug: 'feature-builder',
+    name: 'Builder & Implementer',
+    description: 'Implements features, refactors modules, writes clean production code, and verifies builds/typechecks.',
+    icon: 'code',
+    color: 'emerald',
+    scope: 'both',
+    instructions: `You are a hands-on Builder & Implementer subagent.
+- Read surrounding code first so your implementation matches existing conventions, types, and architecture.
+- Make clean, minimal, production-grade edits and avoid unrelated churn.
+- Run typechecks, tests, or builds to verify your work before finishing.
+- Do not spawn other subagents; report exact modified file paths and verification results.`,
+  },
+  {
+    slug: 'debugger',
+    name: 'Debugger & Fixer',
+    description: 'Reproduces bugs, traces root causes across logs and code, applies targeted fixes, and verifies.',
+    icon: 'bug',
+    color: 'rose',
+    scope: 'both',
+    instructions: `You are a systematic Debugger & Fixer subagent.
+- Reproduce or pinpoint the exact failure from error messages, logs, stack traces, and source code.
+- Identify the root cause before changing code; avoid speculative workarounds.
+- Apply a minimal fix and run targeted tests or verification commands to confirm the issue is resolved.
+- Return root cause, exact files changed, and verification output.`,
+  },
+  {
+    slug: 'test-runner',
+    name: 'Test & QA',
+    description: 'Writes unit/integration tests, runs test suites and typechecks, and diagnoses failures.',
+    icon: 'terminal',
+    color: 'orange',
+    scope: 'both',
+    instructions: `You are a Test & QA subagent.
+- Run the relevant test suites, typecheckers, or linters and capture clear pass/fail diagnostics.
+- When asked to add coverage, write focused, deterministic tests covering happy paths and edge cases.
+- Summarize what passed, what failed, and exact file:line locations for any failures.`,
+  },
   {
     slug: 'web-search',
     name: 'Web Search',
@@ -252,6 +306,23 @@ export type SubagentInput = {
 
 export type SubagentPatch = Partial<SubagentInput>
 
+export type GeneralDelegateInput = {
+  task: string
+  role?: string
+  instructions?: string
+  subagent?: string | number
+  icon?: SubagentIcon
+  color?: SubagentColor
+  project?: string
+  cwd?: string
+  worktree?: boolean
+  harness?: string | null
+  profile?: string
+  model?: string | null
+  effort?: string | null
+  permissionMode?: string | null
+}
+
 type NotifyFn = (
   userId: number,
   kind: NotificationKind,
@@ -259,7 +330,9 @@ type NotifyFn = (
 ) => Promise<void> | void
 
 const MAX_SUBAGENTS_PER_USER = 40
-const MAX_CONCURRENT_RUNS = 4
+const MAX_CONCURRENT_RUNS = 6
+const MAX_BATCH_TASKS = 4
+const GENERAL_SLUGS = new Set(['general', 'default', 'auto'])
 const MAX_STEPS_LOG = 80
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$|^[a-z0-9]$/
 const PROFILE_RE = /^[a-z0-9][a-z0-9-]{0,20}$/
@@ -386,6 +459,7 @@ export function subagentsService({
     userByName: db.prepare("select id, username, name, email, role from users where username = ? and disabled_at is null"),
     sessionInfo: db.prepare("select id, owner_id, title, status, origin_kind, cwd, project_id from claude_sessions where id = ?"),
     projectSlugById: db.prepare("select slug from projects where id = ?"),
+    projectBySlug: db.prepare("select slug from projects where slug = ?"),
 
     list: db.prepare("select * from custom_subagents where user_id = ? order by enabled desc, name collate nocase asc, id asc"),
     byId: db.prepare("select * from custom_subagents where id = ? and user_id = ?"),
@@ -420,7 +494,7 @@ export function subagentsService({
       session_id, caller_kind, caller_session_id, caller_label, task, project_slug, cwd,
       harness, model, effort, status, activity
     ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'Starting…') returning *`),
-    setRunSession: db.prepare("update subagent_runs set session_id = ?, updated_at = unixepoch() where id = ?"),
+    setRunSession: db.prepare("update subagent_runs set session_id = ?, cwd = coalesce(?, cwd), updated_at = unixepoch() where id = ?"),
     runById: db.prepare("select * from subagent_runs where id = ? and user_id = ?"),
     runByIdAny: db.prepare("select * from subagent_runs where id = ?"),
     runBySession: db.prepare("select * from subagent_runs where session_id = ? order by id desc limit 1"),
@@ -546,7 +620,16 @@ export function subagentsService({
 
   function isSubagentSession(sessionId: string | null | undefined): boolean {
     if (!sessionId) return false
-    return !!q.runBySession.get(sessionId)
+    if (q.runBySession.get(sessionId)) return true
+    const s = q.sessionInfo.get(sessionId) as { origin_kind?: string | null } | undefined
+    return s?.origin_kind === 'subagent'
+  }
+
+  function inferProjectFromCwd(cwd: string | undefined): string | undefined {
+    if (!cwd || !cwd.startsWith('/')) return undefined
+    const m = /\/(?:projects|worktrees)\/([^/]+)(?:\/|$)/.exec(cwd)
+    if (!m?.[1]) return undefined
+    return (q.projectBySlug.get(m[1]) as { slug: string } | undefined)?.slug
   }
 
   function appendStep(row: RunRow, status: SubagentRunStatus, label: string, kind: string, detail?: string) {
@@ -652,24 +735,28 @@ export function subagentsService({
     }
   })
 
-  // Inject enabled custom subagents into Hamasa and normal sessions via DevDash's native preamble hook
+  // Inject general & custom subagents into Hamasa and normal sessions via DevDash's native preamble hook
   claude.addPreamble((session, { role }) => {
-    if (role || session.origin_kind === 'proposal') return []
+    if (role || session.origin_kind === 'proposal' || session.origin_kind === 'subagent') return []
     if (isSubagentSession(session.id)) return []
     const isHamasa = session.origin_kind === 'assistant'
     const rows = (q.list.all(session.owner_id) as SubagentRow[]).filter(
       (r) => r.enabled === 1 && (r.scope === 'both' || (isHamasa ? r.scope === 'hamasa' : r.scope === 'sessions')),
     )
-    if (!rows.length) return []
     const subDef = getDefaults(session.owner_id)
-    const lines = rows.map((r) => {
-      const m = r.model ?? (!r.harness ? subDef.model : null)
-      const tag = m ? ` [${m.replace(/^.*\//, '')}]` : ''
-      return `- ${r.slug} (${r.name})${tag}: ${r.description || clip(r.instructions.replace(/\s+/g, ' '), 120)}`
-    }).join('\n')
+    if (!rows.length && !subDef.harness) return []
+    const defTag = subDef.model ? ` [${subDef.model.replace(/^.*\//, '')}${subDef.effort ? ` · ${subDef.effort}` : ''}]` : ''
+    const lines = [
+      `- general (General Subagent)${defTag}: Delegate ANY coding, debugging, testing, shell, or research task ad-hoc via subagent_delegate / subagent_batch / subagent_send (or \`devdash subagent delegate "<task>"\` in Bash; add worktree:true / --worktree for isolated parallel code edits).`,
+      ...rows.map((r) => {
+        const m = r.model ?? (!r.harness ? subDef.model : null)
+        const tag = m ? ` [${m.replace(/^.*\//, '')}]` : ''
+        return `- ${r.slug} (${r.name})${tag}: ${r.description || clip(r.instructions.replace(/\s+/g, ' '), 120)}`
+      }),
+    ].join('\n')
     return [{
       type: 'text',
-      text: `<system-reminder>Custom DevDash subagents available to you (use subagent_run / subagent_status / subagent_stop / subagents_list; run independent subagents in parallel with wait:false when helpful). To save frontier-model usage and speed up exploration, delegate broad multi-file codebase searches, log/doc scanning, and web research to these lightweight subagents instead of reading many files directly:\n${lines}</system-reminder>`,
+      text: `<system-reminder>DevDash subagents available to you (MCP: subagent_delegate, subagent_batch, subagent_send, subagent_run, subagent_status, subagent_stop, subagents_list; CLI: \`devdash subagent delegate|batch|send|run|status|ls|stop\`). Delegate general sub-tasks (parallel implementation in worktrees, testing, debugging, multi-file search, or web research) and continue runs with subagent_send when helpful:\n${lines}</system-reminder>`,
     }]
   })
 
@@ -728,27 +815,98 @@ export function subagentsService({
     return { name, slug, description, instructions, icon, color, scope, harness, profile, model, effort, permissionMode, defaultProject, defaultCwd, enabled }
   }
 
-  async function launchRun(
+  type LaunchSpec = {
+    subagentId: number | null
+    slug: string
+    name: string
+    icon: SubagentIcon
+    color: SubagentColor
+    instructions: string
+    harness: string | null
+    profile: string
+    model: string | null
+    effort: string | null
+    permissionMode: string | null
+    defaultProject: string | null
+    defaultCwd: string | null
+    hasOverrides?: boolean
+  }
+
+  function specFromSaved(subagent: SubagentRow, overrides?: Partial<Pick<GeneralDelegateInput, 'role' | 'instructions' | 'harness' | 'profile' | 'model' | 'effort' | 'permissionMode'>>): LaunchSpec {
+    if (!subagent.enabled) throw new AppError(409, 'subagent_disabled', `Subagent "${subagent.name}" is disabled.`)
+    const extraInstr = overrides?.instructions?.trim() ? overrides.instructions.trim().slice(0, 12_000) : ''
+    const hasModelOverride = Boolean(overrides?.harness || overrides?.model || overrides?.effort || overrides?.permissionMode)
+    const explicitHarness = overrides?.harness
+      ? ((HARNESSES as readonly string[]).includes(overrides.harness) ? overrides.harness : (() => { throw new AppError(400, 'bad_harness', 'Unknown agent engine.') })())
+      : subagent.harness
+    return {
+      subagentId: subagent.id,
+      slug: subagent.slug,
+      name: overrides?.role?.trim() ? overrides.role.trim().slice(0, 60) : subagent.name,
+      icon: subagent.icon,
+      color: subagent.color,
+      instructions: extraInstr ? `${subagent.instructions}\n\n## Additional Task Instructions\n${extraInstr}` : subagent.instructions,
+      harness: explicitHarness,
+      profile: overrides?.profile?.trim() || subagent.profile || 'default',
+      model: overrides?.model?.trim() ? overrides.model.trim().slice(0, 200) : (overrides?.harness && overrides.harness !== subagent.harness ? null : subagent.model),
+      effort: overrides?.effort?.trim() ? overrides.effort.trim().slice(0, 40) : (overrides?.model && overrides.model !== subagent.model ? null : subagent.effort),
+      permissionMode: overrides?.permissionMode?.trim() || subagent.permission_mode,
+      defaultProject: subagent.default_project,
+      defaultCwd: subagent.default_cwd,
+      hasOverrides: hasModelOverride,
+    }
+  }
+
+  function specFromGeneral(input: Omit<GeneralDelegateInput, 'task'>): LaunchSpec {
+    const roleName = input.role?.trim() ? input.role.trim().slice(0, 60) : 'General Subagent'
+    const customInstr = input.instructions?.trim() ? input.instructions.trim().slice(0, 16_000) : ''
+    const icon: SubagentIcon = input.icon && (SUBAGENT_ICONS as readonly string[]).includes(input.icon) ? input.icon : 'zap'
+    const color: SubagentColor = input.color && (SUBAGENT_COLORS as readonly string[]).includes(input.color) ? input.color : 'blue'
+    const explicitHarness = input.harness
+      ? ((HARNESSES as readonly string[]).includes(input.harness) ? input.harness : (() => { throw new AppError(400, 'bad_harness', 'Unknown agent engine.') })())
+      : null
+    const hasModelOverride = Boolean(explicitHarness || input.model?.trim() || input.effort?.trim() || input.permissionMode?.trim())
+    return {
+      subagentId: null,
+      slug: 'general',
+      name: roleName,
+      icon,
+      color,
+      instructions: customInstr
+        ? `${DEFAULT_GENERAL_INSTRUCTIONS}\n\n## Role & Task Instructions\n${customInstr}`
+        : DEFAULT_GENERAL_INSTRUCTIONS,
+      harness: explicitHarness,
+      profile: input.profile?.trim() || 'default',
+      model: input.model?.trim() ? input.model.trim().slice(0, 200) : null,
+      effort: input.effort?.trim() ? input.effort.trim().slice(0, 40) : null,
+      permissionMode: input.permissionMode?.trim() ? input.permissionMode.trim() : null,
+      defaultProject: null,
+      defaultCwd: null,
+      hasOverrides: hasModelOverride,
+    }
+  }
+
+  async function launchSpec(
     user: User,
-    subagent: SubagentRow,
+    spec: LaunchSpec,
     opts: {
       task: string
       project?: string
       cwd?: string
+      worktree?: boolean
       callerKind: SubagentCallerKind
       callerSessionId?: string | null
       callerLabel?: string | null
     },
   ): Promise<SubagentRunDto> {
-    if (!subagent.enabled) throw new AppError(409, 'subagent_disabled', `Subagent "${subagent.name}" is disabled.`)
     if (opts.callerSessionId && isSubagentSession(opts.callerSessionId)) {
       throw new AppError(403, 'subagent_recursion', 'Custom subagents cannot spawn other subagents.')
     }
     const activeN = (q.activeCount.get(user.id) as { n: number }).n
     if (activeN >= MAX_CONCURRENT_RUNS) {
-      throw new AppError(409, 'subagent_limit', `Up to ${MAX_CONCURRENT_RUNS} custom subagents can run at the same time. Stop one or wait for it to finish.`)
+      throw new AppError(409, 'subagent_limit', `Up to ${MAX_CONCURRENT_RUNS} subagents can run at the same time. Stop one or wait for it to finish.`)
     }
-    rateLimit('subagent-run:' + user.id, 30, 10 * 60_000)
+    rateLimit('subagent-run:' + user.id, 40, 10 * 60_000)
 
     const task = opts.task.trim().slice(0, 12_000)
     if (!task) throw new AppError(400, 'bad_task', 'Give the subagent a task to perform.')
@@ -756,38 +914,47 @@ export function subagentsService({
     const mainDefaults = claude.defaults(user)
     const subDefaults = getDefaults(user.id)
     const baseHarness: Harness = subDefaults.harness ?? harnessOf(mainDefaults.harness)
-    const harness: Harness = subagent.harness ? harnessOf(subagent.harness) : baseHarness
-    const usesSubDefault = !subagent.harness && !!subDefaults.harness
+    const harness: Harness = spec.harness ? harnessOf(spec.harness) : baseHarness
+    const usesSubDefault = !spec.harness && !!subDefaults.harness
     const sameAsMain = harness === harnessOf(mainDefaults.harness)
     const profile = harness === 't3code'
       ? 'default'
-      : subagent.harness
-        ? subagent.profile
+      : spec.harness
+        ? spec.profile
         : usesSubDefault
           ? subDefaults.profile
           : mainDefaults.profile
-    const model = subagent.model
-      ?? (subagent.harness
-        ? (subagent.harness === subDefaults.harness ? subDefaults.model : null)
+    const model = spec.model
+      ?? (spec.harness
+        ? (spec.harness === subDefaults.harness ? subDefaults.model : null)
         : (usesSubDefault ? subDefaults.model : (sameAsMain ? mainDefaults.model : null)))
-    const effort = subagent.effort
-      ?? (subagent.harness
-        ? (subagent.harness === subDefaults.harness && model === subDefaults.model ? subDefaults.effort : null)
+    const effort = spec.effort
+      ?? (spec.harness
+        ? (spec.harness === subDefaults.harness && model === subDefaults.model ? subDefaults.effort : null)
         : (usesSubDefault && model === subDefaults.model
           ? subDefaults.effort
           : (sameAsMain && model === mainDefaults.model ? mainDefaults.effort : null)))
-    const rawPerm = subagent.permission_mode ?? subDefaults.permissionMode ?? mainDefaults.permission_mode
+    const rawPerm = spec.permissionMode ?? subDefaults.permissionMode ?? mainDefaults.permission_mode
     const permissionMode = supportsPermissionMode(harness, rawPerm) ? rawPerm : 'bypassPermissions'
-    const project = opts.project?.trim() || subagent.default_project || undefined
-    const cwd = opts.cwd?.trim() || subagent.default_cwd || '~'
+
+    if (spec.hasOverrides) {
+      await validateConfig(user, { harness, profile, model, effort, permissionMode })
+    }
+
+    const rawCwd = opts.cwd?.trim() || spec.defaultCwd || '~'
+    const project = opts.project?.trim() || spec.defaultProject || (opts.worktree ? inferProjectFromCwd(rawCwd) : undefined) || undefined
+    if (opts.worktree && !project) {
+      throw new AppError(400, 'worktree_needs_project', 'Pass a project (or run inside a project folder) to create an isolated git worktree.')
+    }
+    const cwd = rawCwd
 
     const runRow = q.insertRun.get(
       user.id,
-      subagent.id,
-      subagent.slug,
-      subagent.name,
-      subagent.icon,
-      subagent.color,
+      spec.subagentId,
+      spec.slug,
+      spec.name,
+      spec.icon,
+      spec.color,
       null,
       opts.callerKind,
       opts.callerSessionId ?? null,
@@ -802,8 +969,9 @@ export function subagentsService({
     publish(user.id, runRow.id)
 
     const fullInstructions = [
-      `You are "${subagent.name}", a custom DevDash subagent delegated a focused task.`,
-      subagent.instructions,
+      `You are "${spec.name}", a DevDash subagent delegated a focused task.`,
+      spec.instructions,
+      'Do not spawn or invoke other DevDash subagents (never call subagent_* tools or \`devdash subagent\`); complete this task directly yourself.',
       'Finish with a clear, self-contained answer directly addressing the delegated task.',
     ].join('\n\n')
 
@@ -821,15 +989,18 @@ export function subagentsService({
           permissionMode,
           mode: 'chat',
           project,
-          worktree: false,
+          worktree: Boolean(opts.worktree && project),
         },
         {
-          title: `[${subagent.name}] ${clip(task.split('\n')[0] ?? task, 56)}`,
+          title: `[${spec.name}] ${clip(task.split('\n')[0] ?? task, 56)}`,
           instructions: fullInstructions,
           listed: false,
+          shared: false,
+          origin: { kind: 'subagent', role: spec.slug },
         },
       )
-      q.setRunSession.run(session.id, runRow.id)
+      const actualCwd = typeof (session as { cwd?: unknown }).cwd === 'string' && (session as { cwd: string }).cwd ? (session as { cwd: string }).cwd : null
+      q.setRunSession.run(session.id, actualCwd, runRow.id)
       const latest = q.runByIdAny.get(runRow.id) as RunRow
       publish(user.id, runRow.id)
       return runDto(latest)
@@ -839,6 +1010,22 @@ export function subagentsService({
       publish(user.id, runRow.id)
       throw err
     }
+  }
+
+  async function launchRun(
+    user: User,
+    subagent: SubagentRow,
+    opts: {
+      task: string
+      project?: string
+      cwd?: string
+      worktree?: boolean
+      callerKind: SubagentCallerKind
+      callerSessionId?: string | null
+      callerLabel?: string | null
+    },
+  ): Promise<SubagentRunDto> {
+    return launchSpec(user, specFromSaved(subagent), opts)
   }
 
   function waitForRun(runId: number, timeoutMs: number): Promise<SubagentRunDto | null> {
@@ -981,13 +1168,32 @@ export function subagentsService({
       return runDto(row)
     },
 
-    async runManual(user: User, subagentId: number, opts: { task: string; project?: string; cwd?: string }) {
+    async runManual(user: User, subagentId: number, opts: { task: string; project?: string; cwd?: string; worktree?: boolean }) {
       const subagent = q.byId.get(subagentId, user.id) as SubagentRow | undefined
       if (!subagent) throw new AppError(404, 'subagent_not_found', 'Subagent not found.')
       return launchRun(user, subagent, {
         task: opts.task,
         project: opts.project,
         cwd: opts.cwd,
+        worktree: opts.worktree,
+        callerKind: 'manual',
+        callerLabel: 'Manual',
+      })
+    },
+
+    async delegateManual(user: User, input: GeneralDelegateInput) {
+      const ref = typeof input.subagent === 'string' ? input.subagent.trim() : typeof input.subagent === 'number' ? input.subagent : ''
+      let spec: LaunchSpec
+      if (ref && !(typeof ref === 'string' && GENERAL_SLUGS.has(ref.toLowerCase()) && !q.bySlug.get(user.id, slugify(ref)))) {
+        spec = specFromSaved(resolveSubagent(user.id, ref), input)
+      } else {
+        spec = specFromGeneral(input)
+      }
+      return launchSpec(user, spec, {
+        task: input.task,
+        project: input.project,
+        cwd: input.cwd,
+        worktree: input.worktree,
         callerKind: 'manual',
         callerLabel: 'Manual',
       })
@@ -997,11 +1203,20 @@ export function subagentsService({
       const row = q.runById.get(runId, user.id) as RunRow | undefined
       if (!row) throw new AppError(404, 'subagent_run_not_found', 'Subagent run not found.')
       if (!row.session_id) throw new AppError(409, 'no_session', 'This run has no underlying session to continue.')
+      if (row.status === 'running' || row.status === 'waiting') {
+        throw new AppError(409, 'subagent_busy', 'Wait for this subagent run to finish (or stop it) before sending a follow-up.')
+      }
       const text = message.trim().slice(0, 8000)
       if (!text) throw new AppError(400, 'bad_message', 'Write a follow-up message.')
       q.reopenRun.run(row.id)
       appendStep(q.runByIdAny.get(row.id) as RunRow, 'running', `Follow-up: ${clip(text, 80)}`, 'user')
-      await claude.send(user, row.session_id, text, [])
+      try {
+        await claude.send(user, row.session_id, text, [])
+      } catch (err) {
+        q.finishRun.run(row.status, row.activity, row.result, row.error, row.cost_usd, row.id)
+        publish(user.id, row.id)
+        throw err
+      }
       return runDto(q.runByIdAny.get(row.id) as RunRow)
     },
 
@@ -1068,13 +1283,107 @@ export function subagentsService({
         return { available: !c.blocked }
       })
 
+      const ensureAllowed = (c: ReturnType<typeof resolveCtx>) => {
+        if (isSubagentSession(c.sessionId)) {
+          throw new AppError(403, 'subagent_recursion', 'Custom subagents cannot spawn other subagents.')
+        }
+        if (c.blocked) {
+          throw new AppError(403, 'subagent_blocked', 'Subagents are not available in this session.')
+        }
+      }
+
+      const strArg = (obj: Record<string, unknown>, key: string) =>
+        typeof obj[key] === 'string' && (obj[key] as string).trim() ? (obj[key] as string).trim() : undefined
+
+      const resolveMcpSpec = (c: ReturnType<typeof resolveCtx>, raw: Record<string, unknown>, requireRef: boolean): LaunchSpec => {
+        const ref = typeof raw.subagent === 'string' ? raw.subagent.trim() : typeof raw.subagent === 'number' ? raw.subagent : ''
+        if (!ref && requireRef) {
+          throw new AppError(400, 'bad_args', 'Pass "subagent" (slug/id from subagents_list, or "general"), or use subagent_delegate.')
+        }
+        const overrides = {
+          role: strArg(raw, 'role'),
+          instructions: strArg(raw, 'instructions'),
+          harness: strArg(raw, 'harness'),
+          profile: strArg(raw, 'profile'),
+          model: strArg(raw, 'model'),
+          effort: strArg(raw, 'effort'),
+          permissionMode: strArg(raw, 'permission_mode') ?? strArg(raw, 'permissionMode'),
+        }
+        const isBuiltInGeneral = !ref || (typeof ref === 'string' && GENERAL_SLUGS.has(ref.toLowerCase()) && !q.bySlug.get(c.user.id, slugify(ref)))
+        if (isBuiltInGeneral) {
+          return specFromGeneral({
+            ...overrides,
+            icon: strArg(raw, 'icon') as SubagentIcon | undefined,
+            color: strArg(raw, 'color') as SubagentColor | undefined,
+          })
+        }
+        const subagent = resolveSubagent(c.user.id, ref)
+        const allowedScope = subagent.scope === 'both' || (c.isHamasa ? subagent.scope === 'hamasa' : subagent.scope === 'sessions')
+        if (!allowedScope) {
+          throw new AppError(403, 'subagent_scope', `Subagent "${subagent.name}" is configured for ${subagent.scope === 'hamasa' ? 'Hamasa only' : 'normal sessions only'}.`)
+        }
+        return specFromSaved(subagent, overrides)
+      }
+
+      const formatMcpRun = (run: SubagentRunDto, waited: boolean) => {
+        if (!waited) {
+          return {
+            runId: run.id,
+            subagent: run.subagentSlug,
+            name: run.subagentName,
+            project: run.projectSlug,
+            cwd: run.cwd,
+            status: run.status,
+            activity: run.activity,
+            url: '/subagents',
+            note: 'Started in background. Check progress with subagent_status or send follow-ups with subagent_send.',
+          }
+        }
+        return {
+          runId: run.id,
+          subagent: run.subagentSlug,
+          name: run.subagentName,
+          project: run.projectSlug,
+          cwd: run.cwd,
+          status: run.status,
+          activity: run.activity,
+          stepsCount: run.steps.length,
+          result: run.result,
+          error: run.error,
+          url: '/subagents',
+          ...(run.status === 'running' || run.status === 'waiting'
+            ? { note: 'Still running in background; call subagent_status with run_id (and wait_sec up to 45) to wait or check progress.' }
+            : {}),
+        }
+      }
+
+      const launchFromMcpItem = async (c: ReturnType<typeof resolveCtx>, raw: Record<string, unknown>, requireRef: boolean) => {
+        const task = strArg(raw, 'task') ?? ''
+        if (!task) throw new AppError(400, 'bad_args', 'Pass "task" with clear instructions for the subagent.')
+        const spec = resolveMcpSpec(c, raw, requireRef)
+        const project = strArg(raw, 'project') ?? c.projectSlug
+        const cwd = strArg(raw, 'folder') ?? strArg(raw, 'cwd') ?? c.cwd
+        const worktree = raw.worktree === true
+        return launchSpec(c.user, spec, {
+          task,
+          project,
+          cwd,
+          worktree,
+          callerKind: c.isHamasa ? 'hamasa' : 'session',
+          callerSessionId: c.sessionId,
+          callerLabel: c.isHamasa ? 'Hamasa' : (c.sessionTitle || 'Session'),
+        })
+      }
+
       agents.onRpc('mcp.subagents_list', (username, params) => {
         const c = resolveCtx(username, params)
-        if (c.blocked) return { subagents: [], activeRuns: [] }
+        if (c.blocked) return { generalAvailable: false, subagents: [], activeRuns: [] }
         const list = subagentDtos(c.user.id).filter(
           (s) => s.enabled && (s.scope === 'both' || (c.isHamasa ? s.scope === 'hamasa' : s.scope === 'sessions')),
         )
         return {
+          generalAvailable: true,
+          defaults: getDefaults(c.user.id),
           subagents: list.map((s) => ({
             id: s.id,
             slug: s.slug,
@@ -1089,67 +1398,113 @@ export function subagentsService({
           activeRuns: (q.activeRuns.all(c.user.id) as RunRow[]).map((r) => ({
             id: r.id,
             subagent: r.subagent_slug,
+            name: r.subagent_name,
+            cwd: r.cwd,
             status: r.status,
             activity: r.activity,
           })),
         }
       })
 
+      agents.onRpc('mcp.subagent_delegate', async (username, params) => {
+        const c = resolveCtx(username, params)
+        ensureAllowed(c)
+        const run = await launchFromMcpItem(c, c.args, false)
+        const wait = c.args.wait !== false
+        if (!wait) return formatMcpRun(run, false)
+        const timeoutMs = Math.max(5_000, Math.min(Number(c.args.timeout_sec || 45) * 1000, 50_000))
+        const final = (await waitForRun(run.id, timeoutMs)) ?? run
+        return formatMcpRun(final, true)
+      })
+
       agents.onRpc('mcp.subagent_run', async (username, params) => {
         const c = resolveCtx(username, params)
-        if (isSubagentSession(c.sessionId)) {
-          throw new AppError(403, 'subagent_recursion', 'Custom subagents cannot spawn other subagents.')
-        }
-        const ref = typeof c.args.subagent === 'string' ? c.args.subagent.trim() : typeof c.args.subagent === 'number' ? c.args.subagent : ''
-        if (!ref) throw new AppError(400, 'bad_args', 'Pass "subagent" (slug or id from subagents_list).')
-        const task = typeof c.args.task === 'string' ? c.args.task.trim() : ''
-        if (!task) throw new AppError(400, 'bad_args', 'Pass "task" with clear instructions for the subagent.')
-        const subagent = resolveSubagent(c.user.id, ref)
-        const allowedScope = subagent.scope === 'both' || (c.isHamasa ? subagent.scope === 'hamasa' : subagent.scope === 'sessions')
-        if (!allowedScope) {
-          throw new AppError(403, 'subagent_scope', `Subagent "${subagent.name}" is configured for ${subagent.scope === 'hamasa' ? 'Hamasa only' : 'normal sessions only'}.`)
-        }
-        const project = typeof c.args.project === 'string' && c.args.project.trim() ? c.args.project.trim() : c.projectSlug
-        const cwd = typeof c.args.folder === 'string' && c.args.folder.trim() ? c.args.folder.trim() : c.cwd
-        const run = await launchRun(c.user, subagent, {
-          task,
-          project,
-          cwd,
-          callerKind: c.isHamasa ? 'hamasa' : 'session',
-          callerSessionId: c.sessionId,
-          callerLabel: c.isHamasa ? 'Hamasa' : (c.sessionTitle || 'Session'),
-        })
+        ensureAllowed(c)
+        const run = await launchFromMcpItem(c, c.args, true)
         const wait = c.args.wait !== false
-        if (!wait) {
-          return {
-            runId: run.id,
-            subagent: run.subagentSlug,
-            status: run.status,
-            activity: run.activity,
-            url: '/subagents',
-            note: 'Started in background. Check progress with subagent_status.',
-          }
-        }
+        if (!wait) return formatMcpRun(run, false)
         // Stay under the 60s member-agent RPC timeout so the caller gets a clean handle if the task runs longer.
         const timeoutMs = Math.max(5_000, Math.min(Number(c.args.timeout_sec || 45) * 1000, 50_000))
         const final = (await waitForRun(run.id, timeoutMs)) ?? run
-        return {
-          runId: final.id,
-          subagent: final.subagentSlug,
-          status: final.status,
-          activity: final.activity,
-          stepsCount: final.steps.length,
-          result: final.result,
-          error: final.error,
-          url: '/subagents',
-          ...(final.status === 'running' || final.status === 'waiting'
-            ? { note: 'Still running in background; call subagent_status with run_id (and wait_sec up to 45) to wait or check progress.' }
-            : {}),
+        return formatMcpRun(final, true)
+      })
+
+      agents.onRpc('mcp.subagent_batch', async (username, params) => {
+        const c = resolveCtx(username, params)
+        ensureAllowed(c)
+        const items = Array.isArray(c.args.tasks) ? (c.args.tasks as Record<string, unknown>[]) : []
+        if (!items.length || items.length > MAX_BATCH_TASKS) {
+          throw new AppError(400, 'bad_args', `Pass "tasks" with 1 to ${MAX_BATCH_TASKS} subagent tasks to run in parallel.`)
         }
+        for (const item of items) {
+          if (!item || typeof item !== 'object' || !strArg(item, 'task')) {
+            throw new AppError(400, 'bad_args', 'Every item in "tasks" must be an object with a non-empty "task" string.')
+          }
+        }
+        const activeN = (q.activeCount.get(c.user.id) as { n: number }).n
+        if (activeN + items.length > MAX_CONCURRENT_RUNS) {
+          throw new AppError(
+            409,
+            'subagent_limit',
+            `Batch needs ${items.length} slots, but ${activeN}/${MAX_CONCURRENT_RUNS} subagents are already running.`,
+          )
+        }
+        const launched: SubagentRunDto[] = []
+        for (const item of items) {
+          launched.push(await launchFromMcpItem(c, item, false))
+        }
+        const wait = c.args.wait !== false
+        if (!wait) {
+          return { runs: launched.map((r) => formatMcpRun(r, false)) }
+        }
+        const timeoutMs = Math.max(5_000, Math.min(Number(c.args.timeout_sec || 45) * 1000, 50_000))
+        const settled = await Promise.all(launched.map(async (r) => (await waitForRun(r.id, timeoutMs)) ?? r))
+        return { runs: settled.map((r) => formatMcpRun(r, true)) }
+      })
+
+      agents.onRpc('mcp.subagent_send', async (username, params) => {
+        const c = resolveCtx(username, params)
+        ensureAllowed(c)
+        const id = Number(c.args.run_id)
+        if (!Number.isInteger(id) || id < 1) throw new AppError(400, 'bad_args', 'run_id must be a positive integer.')
+        const message = strArg(c.args, 'message') ?? ''
+        if (!message) throw new AppError(400, 'bad_args', 'Pass a non-empty follow-up "message".')
+        const reopened = await service.sendToRun(c.user, id, message)
+        const wait = c.args.wait !== false
+        if (!wait) return formatMcpRun(reopened, false)
+        const timeoutMs = Math.max(5_000, Math.min(Number(c.args.timeout_sec || 45) * 1000, 50_000))
+        const final = (await waitForRun(reopened.id, timeoutMs)) ?? service.getRun(c.user, id)
+        return formatMcpRun(final, true)
+      })
+
+      agents.onRpc('mcp.subagent_create', async (username, params) => {
+        const c = resolveCtx(username, params)
+        ensureAllowed(c)
+        const name = strArg(c.args, 'name') ?? ''
+        const instructions = strArg(c.args, 'instructions') ?? ''
+        if (!name || !instructions) {
+          throw new AppError(400, 'bad_args', 'Pass both "name" and "instructions" to save a reusable subagent.')
+        }
+        const created = await service.create(c.user, {
+          name,
+          slug: strArg(c.args, 'slug'),
+          description: strArg(c.args, 'description'),
+          instructions,
+          icon: strArg(c.args, 'icon') as SubagentIcon | undefined,
+          color: strArg(c.args, 'color') as SubagentColor | undefined,
+          scope: strArg(c.args, 'scope') as SubagentScope | undefined,
+          harness: strArg(c.args, 'harness') ?? null,
+          profile: strArg(c.args, 'profile'),
+          model: strArg(c.args, 'model') ?? null,
+          effort: strArg(c.args, 'effort') ?? null,
+          defaultProject: strArg(c.args, 'default_project') ?? strArg(c.args, 'defaultProject') ?? null,
+        })
+        return { subagent: created, url: '/subagents' }
       })
 
       agents.onRpc('mcp.subagent_status', async (username, params) => {
         const c = resolveCtx(username, params)
+        if (c.blocked) throw new AppError(403, 'subagent_blocked', 'Subagents are not available in this session.')
         if (c.args.run_id !== undefined) {
           const id = Number(c.args.run_id)
           if (!Number.isInteger(id) || id < 1) throw new AppError(400, 'bad_args', 'run_id must be a positive integer.')
@@ -1162,6 +1517,8 @@ export function subagentsService({
             runId: r.id,
             subagent: r.subagentSlug,
             name: r.subagentName,
+            project: r.projectSlug,
+            cwd: r.cwd,
             status: r.status,
             activity: r.activity,
             recentSteps: r.steps.slice(-8),
@@ -1175,6 +1532,8 @@ export function subagentsService({
             runId: r.id,
             subagent: r.subagentSlug,
             name: r.subagentName,
+            project: r.projectSlug,
+            cwd: r.cwd,
             status: r.status,
             activity: r.activity,
             task: clip(r.task, 100),
@@ -1184,6 +1543,7 @@ export function subagentsService({
 
       agents.onRpc('mcp.subagent_stop', async (username, params) => {
         const c = resolveCtx(username, params)
+        if (c.blocked) throw new AppError(403, 'subagent_blocked', 'Subagents are not available in this session.')
         const id = Number(c.args.run_id)
         if (!Number.isInteger(id) || id < 1) throw new AppError(400, 'bad_args', 'run_id must be a positive integer.')
         const r = await service.stopRun(c.user, id)

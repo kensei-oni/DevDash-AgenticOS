@@ -25,6 +25,18 @@ const DB_HELP = `Each worktree's own copy of the project's dev database (when it
   devdash db          this worktree's own databases (or, in the main checkout, what new worktrees get)
   devdash db reset    copy the main database into this worktree's again, e.g. after main's migrations moved on`
 
+const SUBAGENT_HELP = `Delegate general or specialist tasks to isolated DevDash subagents (works from any session or terminal).
+
+  devdash subagent delegate "<task>" [--role "<name>"] [--instructions "<text>"]
+        [--project <slug>] [--cwd <folder>] [--worktree] [--harness claude|opencode|t3code]
+        [--model <id>] [--effort <level>] [--bg] [--timeout <sec>] [--json]
+  devdash subagent run <slug|general> "<task>" [--project <slug>] [--cwd <folder>] [--worktree] [--bg] [--json]
+  devdash subagent batch '<json-tasks-array>' [--bg] [--timeout <sec>] [--json]
+  devdash subagent send <runId> "<message>" [--bg] [--timeout <sec>] [--json]
+  devdash subagent status [runId] [--wait <sec>] [--json]
+  devdash subagent ls [--json]
+  devdash subagent stop <runId>`
+
 type Service = { name: string; owner: { username: string }; port: number; state: string; listening: boolean; command: string; cwd: string; session: { title: string } | null }
 
 function call(method: string, params: object = {}): Promise<Record<string, unknown>> {
@@ -48,8 +60,187 @@ function call(method: string, params: object = {}): Promise<Record<string, unkno
 
 const state = (s: Service) => (s.state === 'running' ? (s.listening ? 'running' : 'running, not listening yet') : s.state)
 
+
+type SubagentCliRun = {
+  runId: number
+  subagent: string
+  name?: string
+  project?: string | null
+  cwd?: string | null
+  status: string
+  activity?: string
+  stepsCount?: number
+  recentSteps?: { label: string; detail?: string }[]
+  result?: string | null
+  error?: string | null
+  note?: string
+}
+
+function printSubagentRun(r: SubagentCliRun, asJson?: boolean) {
+  if (asJson) return console.log(JSON.stringify(r, null, 2))
+  const header = `[run #${r.runId}] ${r.name || r.subagent} · ${r.status}${r.cwd ? ` (${r.cwd})` : ''}`
+  console.log(header)
+  if (r.error) console.log(`Error: ${r.error}`)
+  if (r.result) console.log(`\n${r.result}`)
+  else if (r.activity && r.status !== 'completed') console.log(`Activity: ${r.activity}`)
+  if (r.recentSteps?.length && r.status !== 'completed') {
+    for (const st of r.recentSteps) console.log(`  - ${st.label}${st.detail ? ` (${st.detail})` : ''}`)
+  }
+  if (r.note) console.log(`Note: ${r.note}`)
+}
+
+async function runSubagentCli(cmd: string | undefined, rest: string[]) {
+  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
+    console.log(SUBAGENT_HELP)
+    return
+  }
+  const { values, positionals } = parseArgs({
+    args: rest,
+    allowPositionals: true,
+    options: {
+      role: { type: 'string' },
+      instructions: { type: 'string' },
+      subagent: { type: 'string' },
+      project: { type: 'string' },
+      cwd: { type: 'string' },
+      worktree: { type: 'boolean' },
+      harness: { type: 'string' },
+      model: { type: 'string' },
+      effort: { type: 'string' },
+      bg: { type: 'boolean' },
+      timeout: { type: 'string' },
+      wait: { type: 'string' },
+      json: { type: 'boolean' },
+    },
+  })
+  const mcpCall = (name: string, args: Record<string, unknown> = {}) =>
+    call(`mcp.${name}`, {
+      sessionId: process.env.DEVDASH_SESSION_ID || null,
+      cwd: values.cwd ?? process.cwd(),
+      args,
+    })
+
+  switch (cmd) {
+    case 'ls':
+    case 'list': {
+      const r = await mcpCall('subagents_list') as {
+        generalAvailable?: boolean
+        defaults?: { harness?: string | null; model?: string | null; effort?: string | null } | null
+        subagents?: { slug: string; name: string; scope: string; model: string | null; activeCount: number; description: string }[]
+        activeRuns?: { id: number; subagent: string; name?: string; status: string; activity: string; cwd?: string | null }[]
+      }
+      if (values.json) return console.log(JSON.stringify(r, null, 2))
+      const defModel = r.defaults?.model ? `${r.defaults.model}${r.defaults.effort ? ` · ${r.defaults.effort}` : ''}` : 'inherits session default'
+      console.log(`General subagent: ${r.generalAvailable === false ? 'unavailable in this session' : `ready (${defModel})`}`)
+      if (r.subagents?.length) {
+        console.log('\nSaved subagents:')
+        for (const s of r.subagents) {
+          console.log(`  ${s.slug.padEnd(18)} ${s.name.padEnd(22)} [${s.model || 'default'}] ${s.description}`)
+        }
+      }
+      if (r.activeRuns?.length) {
+        console.log('\nActive runs:')
+        for (const a of r.activeRuns) {
+          console.log(`  #${String(a.id).padEnd(5)} ${(a.name || a.subagent).padEnd(20)} ${a.status.padEnd(9)} ${a.activity}`)
+        }
+      }
+      return
+    }
+    case 'delegate': {
+      const task = positionals.join(' ').trim()
+      if (!task) throw new Error('Usage: devdash subagent delegate "<task>" [--role "<name>"] [--worktree] [--bg]')
+      const r = await mcpCall('subagent_delegate', {
+        task,
+        ...(values.role ? { role: values.role } : {}),
+        ...(values.instructions ? { instructions: values.instructions } : {}),
+        ...(values.subagent ? { subagent: values.subagent } : {}),
+        ...(values.project ? { project: values.project } : {}),
+        ...(values.cwd ? { folder: values.cwd } : {}),
+        ...(values.worktree ? { worktree: true } : {}),
+        ...(values.harness ? { harness: values.harness } : {}),
+        ...(values.model ? { model: values.model } : {}),
+        ...(values.effort ? { effort: values.effort } : {}),
+        wait: !values.bg,
+        ...(values.timeout ? { timeout_sec: Number(values.timeout) } : {}),
+      }) as unknown as SubagentCliRun
+      return printSubagentRun(r, values.json)
+    }
+    case 'run': {
+      const [slug, ...taskParts] = positionals
+      const task = taskParts.join(' ').trim()
+      if (!slug || !task) throw new Error('Usage: devdash subagent run <slug|general> "<task>" [--project <slug>] [--worktree] [--bg]')
+      const r = await mcpCall('subagent_run', {
+        subagent: slug,
+        task,
+        ...(values.role ? { role: values.role } : {}),
+        ...(values.instructions ? { instructions: values.instructions } : {}),
+        ...(values.project ? { project: values.project } : {}),
+        ...(values.cwd ? { folder: values.cwd } : {}),
+        ...(values.worktree ? { worktree: true } : {}),
+        wait: !values.bg,
+        ...(values.timeout ? { timeout_sec: Number(values.timeout) } : {}),
+      }) as unknown as SubagentCliRun
+      return printSubagentRun(r, values.json)
+    }
+    case 'batch': {
+      const rawJson = positionals.join(' ').trim()
+      if (!rawJson) throw new Error(`Usage: devdash subagent batch '[{"task":"...","role":"..."}]' [--bg]`)
+      let tasks: unknown
+      try { tasks = JSON.parse(rawJson) } catch { throw new Error('Invalid JSON tasks array passed to devdash subagent batch.') }
+      const r = await mcpCall('subagent_batch', {
+        tasks,
+        wait: !values.bg,
+        ...(values.timeout ? { timeout_sec: Number(values.timeout) } : {}),
+      }) as { runs: SubagentCliRun[] }
+      if (values.json) return console.log(JSON.stringify(r, null, 2))
+      for (const item of r.runs ?? []) {
+        printSubagentRun(item, false)
+        console.log('---')
+      }
+      return
+    }
+    case 'send': {
+      const [idRaw, ...msgParts] = positionals
+      const message = msgParts.join(' ').trim()
+      if (!idRaw || !message) throw new Error('Usage: devdash subagent send <runId> "<follow-up message>" [--bg]')
+      const r = await mcpCall('subagent_send', {
+        run_id: Number(idRaw),
+        message,
+        wait: !values.bg,
+        ...(values.timeout ? { timeout_sec: Number(values.timeout) } : {}),
+      }) as unknown as SubagentCliRun
+      return printSubagentRun(r, values.json)
+    }
+    case 'status': {
+      const idRaw = positionals[0]
+      const r = await mcpCall('subagent_status', {
+        ...(idRaw ? { run_id: Number(idRaw) } : {}),
+        ...(values.wait ? { wait_sec: Number(values.wait) } : {}),
+      })
+      if (values.json) return console.log(JSON.stringify(r, null, 2))
+      if (idRaw) return printSubagentRun(r as unknown as SubagentCliRun, false)
+      const runs = (r as { runs?: { runId: number; name?: string; subagent: string; status: string; task: string }[] }).runs ?? []
+      if (!runs.length) return console.log('No recent subagent runs.')
+      for (const item of runs) {
+        console.log(`#${String(item.runId).padEnd(5)} ${(item.name || item.subagent).padEnd(20)} ${item.status.padEnd(10)} ${item.task}`)
+      }
+      return
+    }
+    case 'stop': {
+      const idRaw = positionals[0]
+      if (!idRaw) throw new Error('Usage: devdash subagent stop <runId>')
+      const r = await mcpCall('subagent_stop', { run_id: Number(idRaw) }) as { runId: number; status: string }
+      if (values.json) return console.log(JSON.stringify(r, null, 2))
+      return console.log(`Run #${r.runId} ${r.status}.`)
+    }
+    default:
+      throw new Error(`Unknown subagent command: ${cmd}. Try: devdash subagent help`)
+  }
+}
+
 async function main(argv: string[]) {
   const [group, cmd, ...rest] = argv
+  if (group === 'subagent' || group === 'subagents') return runSubagentCli(cmd, rest)
   // `devdash db [reset]`: this worktree's own copy of the dev database (worktree-db.ts), run here as the member.
   if (group === 'db') {
     if (cmd && cmd !== 'reset' && cmd !== 'status') return console.log(DB_HELP)

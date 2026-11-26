@@ -45,9 +45,27 @@ const DefaultsBody = z.object({
 })
 
 const RunBody = z.object({
-  task: z.string().min(1).max(8_000),
+  task: z.string().min(1).max(12_000),
   project: z.string().max(64).optional(),
   cwd: z.string().max(500).optional(),
+  worktree: z.boolean().optional(),
+})
+
+const DelegateBody = z.object({
+  task: z.string().min(1).max(12_000),
+  role: z.string().max(60).optional(),
+  instructions: z.string().max(16_000).optional(),
+  subagent: z.union([z.string().max(64), z.number().int().positive()]).optional(),
+  icon: z.enum(SUBAGENT_ICONS).optional(),
+  color: z.enum(SUBAGENT_COLORS).optional(),
+  project: z.string().max(64).optional(),
+  cwd: z.string().max(500).optional(),
+  worktree: z.boolean().optional(),
+  harness: HarnessOrNull,
+  profile: z.string().max(64).optional(),
+  model: z.string().max(200).nullable().optional(),
+  effort: z.string().max(40).nullable().optional(),
+  permissionMode: PermOrNull,
 })
 
 const SendBody = z.object({
@@ -79,6 +97,10 @@ export function subagentsRoutes(subagents: SubagentsService, mw: ReturnType<type
     .post('/', json(CreateBody), async (c) => {
       const subagent = await subagents.create(c.get('user'), c.req.valid('json'))
       return c.json({ subagent }, 201)
+    })
+    .post('/delegate', json(DelegateBody), async (c) => {
+      const run = await subagents.delegateManual(c.get('user'), c.req.valid('json'))
+      return c.json({ run }, 201)
     })
     .get('/runs', query(RunsQuery), (c) => {
       const q = c.req.valid('query')

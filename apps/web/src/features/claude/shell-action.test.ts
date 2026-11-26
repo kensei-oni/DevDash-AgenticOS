@@ -40,6 +40,7 @@ test('shell commands read as what they do (Claude Code has no Grep or Glob tools
     ['unzip -o handoff.zip -d /tmp/x', 'Unpacked'],
     ['pandoc doc.docx -t plain', 'Converted'],
     ['devdash service add web --cmd "npm start"', 'Managed services'],
+    ['devdash subagent delegate "Run test suite"', 'Delegated to subagent'],
     ['some-new-cli --flag', 'Ran'],
   ]
   for (const [c, verb] of cases) assert.equal(shellAction(c).verb, verb, c)

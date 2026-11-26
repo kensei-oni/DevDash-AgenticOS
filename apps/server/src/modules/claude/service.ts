@@ -177,7 +177,7 @@ export const memoryHealth = (agents: AgentsService, username: string, timeoutMs 
 const baseLaunch = (s: SessionRow) => ({
   id: s.id, harness: s.harness, nativeId: s.native_id, cwd: s.cwd, profile: s.profile, model: s.model, effort: s.effort, permissionMode: s.permission_mode, started: !!s.started,
   fast: !!s.fast_mode, advisor: s.advisor_model, remote: !!s.remote_control, title: s.title,
-  ...(s.origin_kind === 'assistant' ? { originKind: 'assistant' } : {}),
+  ...(s.origin_kind === 'assistant' || s.origin_kind === 'subagent' ? { originKind: s.origin_kind } : {}),
   instructions: s.instructions, toolPolicy: s.tool_policy ? (JSON.parse(s.tool_policy) as { tools?: string[]; allow?: string[] }) : null,
   // The agent fills in the actual proxy ports locally (it is the member); here we only say whether to route and where.
   reachTailnet: !!s.reach_tailnet, tailnetMcps: parseTailnetMcps(s), guestCaps: capsOf(s),
@@ -193,7 +193,7 @@ export type SessionExtras = {
   sharedCanSend?: boolean
   /** Where it came from when a person didn't start it themselves: a team role's approved code proposal, or the owner's
    *  personal agent (unlisted, but it tells its owner what needs them like any session of theirs). */
-  origin?: { kind: 'proposal'; role: string } | { kind: 'assistant'; role?: 'schedule' }
+  origin?: { kind: 'proposal'; role: string } | { kind: 'assistant'; role?: 'schedule' } | { kind: 'subagent'; role?: string }
 }
 
 /** Text blocks a feature puts before the owner's own message (see addPreamble); `role`: a team role's session. */

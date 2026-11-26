@@ -232,4 +232,6 @@ const DRASTIC = [
   /\bcrontab\b(?!\s+-l\b)/,
   /\bsystemctl\s+--user\s+(?:\S+\s+)*?(start|stop|restart|reload|enable|disable|mask|unmask|edit|link|revert|daemon-reload|set-environment|import-environment|kill)\b/,
   /\bloginctl\s+(enable-linger|disable-linger|terminate-\w+|kill-\w+)\b/,
+  // Spawning a personal subagent starts an owner-privileged session: only the owner approves.
+  /\bdevdash\s+subagents?\b/,
 ]

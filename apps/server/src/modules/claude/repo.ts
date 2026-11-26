@@ -43,7 +43,7 @@ export type SessionRow = {
   /** 1: set in the session's Share dialog; 0: the owner's default for its project (`project_guest_caps`). */
   guest_caps_custom: number
   project_guest_caps: string | null
-  origin_kind: 'proposal' | 'assistant' | null
+  origin_kind: 'proposal' | 'assistant' | 'subagent' | null
   drive: number
   origin_role: string | null
   /** How many members it's shared with by name (claude_session_viewers); 0 unless shared with chosen people. */

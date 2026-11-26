@@ -609,11 +609,15 @@ async function runTurns(c: Chat) {
         if (next.workflow) helper = workflowTools(c.launch, next.workflow)
         const prompt = next.guest ? notACommand(toPrompt(next.content)) : toPrompt(next.content)
         const rulesContext = c.launch.harness === 't3code' && c.fresh ? nonPersonalRules() : undefined
+        const subagentContext = c.launch.harness === 't3code' && c.fresh && c.launch.originKind === 'subagent' && c.launch.instructions?.trim()
+          ? c.launch.instructions.trim()
+          : undefined
+        const workflowContext = helper?.context ?? subagentContext
         const r = await c.rpc.request<{ stopReason: string; usage?: Usage }>('session/prompt', {
           sessionId: c.sessionId,
           prompt,
           ...(rulesContext ? { rulesContext } : {}),
-          ...(helper && { workflowContext: helper.context }),
+          ...(workflowContext ? { workflowContext } : {}),
         })
         c.fresh = false
         for (const t of c.children.values()) t.flush()
