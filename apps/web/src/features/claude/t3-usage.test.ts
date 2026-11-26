@@ -1,0 +1,196 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  aggregateT3Usage,
+  computeWindowPace,
+  formatCompactTokens,
+  formatResetCountdown,
+  formatShare,
+  formatUsd,
+  validateT3UsageSearch,
+  type T3SummaryShape,
+} from './t3-usage-math.ts'
+
+test('validateT3UsageSearch accepts valid tab and period values and drops unknown values', () => {
+  assert.deepEqual(validateT3UsageSearch({ tab: 'tokens', period: 'week', extra: 1 }), { tab: 'tokens', period: 'week' })
+  assert.deepEqual(validateT3UsageSearch({ tab: 'price', period: 'quarter' }), { tab: 'price', period: 'quarter' })
+  assert.deepEqual(validateT3UsageSearch({ tab: 'invalid', period: 'year' }), {})
+})
+
+test('formatting helpers match T3 usage display conventions', () => {
+  assert.equal(formatUsd(0), '$0.00')
+  assert.equal(formatUsd(0.0002), '<$0.001')
+  assert.equal(formatUsd(0.0042), '$0.0042')
+  assert.equal(formatUsd(12.345), '$12.35')
+  assert.equal(formatCompactTokens(842), '842')
+  assert.equal(formatCompactTokens(15_400), '15.4K')
+  assert.equal(formatCompactTokens(2_450_000), '2.45M')
+  assert.equal(formatShare(0.254), '25.4%')
+  assert.equal(formatResetCountdown('2026-11-26T22:00:00.000Z', Date.parse('2026-11-26T20:30:00.000Z')), 'Resets in 1h 30m')
+})
+
+test('computeWindowPace computes steady-pace marker and ahead/even/fast states', () => {
+  const now = Date.parse('2026-11-26T20:00:00.000Z')
+  const conserving = computeWindowPace({
+    id: 'session',
+    kind: 'session',
+    label: '5-hour',
+    usedPercent: 20,
+    remainingPercent: 80,
+    resetsAt: new Date(now + 150 * 60_000).toISOString(),
+    windowDurationMins: 300,
+  }, now)
+  assert.ok(conserving)
+  assert.equal(Math.round(conserving.timeLeftPercent), 50)
+  assert.equal(conserving.state, 'ahead')
+
+  const burningFast = computeWindowPace({
+    id: 'session',
+    kind: 'session',
+    label: '5-hour',
+    usedPercent: 75,
+    remainingPercent: 25,
+    resetsAt: new Date(now + 150 * 60_000).toISOString(),
+    windowDurationMins: 300,
+  }, now)
+  assert.ok(burningFast)
+  assert.equal(burningFast.state, 'fast')
+})
+
+test('aggregateT3Usage deduplicates physicalSourceId sources, respects provider filter, and zero-fills series', () => {
+  const summary: T3SummaryShape = {
+    connected: true,
+    period: 'week',
+    resolution: 'day',
+    timeZone: 'UTC',
+    sinceDay: '2026-11-20',
+    untilDay: '2026-11-26',
+    readAt: '2026-11-26T20:00:00.000Z',
+    scanDurationMs: 18,
+    pricing: { status: 'fresh', source: 'litellm', fetchedAt: '2026-11-26T18:00:00.000Z', knownModels: 6352 },
+    priceOverrides: { 'gpt-5.4': { inputCostPerMillionTokens: 2.5, outputCostPerMillionTokens: 15 } },
+    modelAliases: {},
+    sources: [
+      {
+        fingerprint: {
+          hostId: 'local',
+          provider: 'codex',
+          resolvedHomePath: '/home/ken/.codex',
+          volumeId: 'dev1',
+          physicalSourceId: 'inode-100',
+        },
+        status: 'ok',
+        scannedFiles: 4,
+        skippedFiles: 0,
+        malformedRecords: 0,
+        distinctSessions: 3,
+        message: null,
+      },
+      {
+        // Duplicate physicalSourceId for codex at another mount path
+        fingerprint: {
+          hostId: 'remote-ssh',
+          provider: 'codex',
+          resolvedHomePath: '/mnt/ken/.codex',
+          volumeId: 'dev1',
+          physicalSourceId: 'inode-100',
+        },
+        status: 'ok',
+        scannedFiles: 4,
+        skippedFiles: 0,
+        malformedRecords: 0,
+        distinctSessions: 3,
+        message: null,
+      },
+      {
+        fingerprint: {
+          hostId: 'local',
+          provider: 'antigravity',
+          resolvedHomePath: '/home/ken/.antigravity',
+          volumeId: 'dev1',
+          physicalSourceId: 'inode-200',
+        },
+        status: 'ok',
+        scannedFiles: 2,
+        skippedFiles: 0,
+        malformedRecords: 0,
+        distinctSessions: 2,
+        message: null,
+      },
+    ],
+    buckets: [
+      {
+        day: '2026-11-25',
+        provider: 'codex',
+        model: 'gpt-5.4',
+        sourcePath: '/home/ken/.codex',
+        totals: {
+          uncachedInputTokens: 10_000,
+          cachedInputTokens: 40_000,
+          cacheCreationTokens: 0,
+          outputTokens: 5_000,
+          reasoningTokens: 2_000,
+        },
+        costUsd: 0.45,
+        cacheSavingsUsd: 0.08,
+        costSource: 'modelPriced',
+        records: 10,
+        unpricedRecords: 0,
+        sessions: 3,
+      },
+      {
+        // Duplicate bucket from /mnt/ken/.codex — excluded by physicalSourceId dedup!
+        day: '2026-11-25',
+        provider: 'codex',
+        model: 'gpt-5.4',
+        sourcePath: '/mnt/ken/.codex',
+        totals: {
+          uncachedInputTokens: 10_000,
+          cachedInputTokens: 40_000,
+          cacheCreationTokens: 0,
+          outputTokens: 5_000,
+          reasoningTokens: 2_000,
+        },
+        costUsd: 0.45,
+        cacheSavingsUsd: 0.08,
+        costSource: 'modelPriced',
+        records: 10,
+        unpricedRecords: 0,
+        sessions: 3,
+      },
+      {
+        day: '2026-11-26',
+        provider: 'antigravity',
+        model: 'gemini-4-carbon',
+        sourcePath: '/home/ken/.antigravity',
+        totals: {
+          uncachedInputTokens: 20_000,
+          cachedInputTokens: 10_000,
+          cacheCreationTokens: 5_000,
+          outputTokens: 8_000,
+          reasoningTokens: 3_000,
+        },
+        costUsd: 1.25,
+        cacheSavingsUsd: 0.05,
+        costSource: 'providerReported',
+        records: 5,
+        unpricedRecords: 0,
+        sessions: 2,
+      },
+    ],
+  }
+
+  const all = aggregateT3Usage(summary)
+  assert.equal(all.totalTokens, 98_000, 'deduplicated physicalSourceId bucket is excluded')
+  assert.equal(Math.round(all.costUsd * 100), 170)
+  assert.equal(all.sessions, 5)
+  assert.equal(all.models.length, 2)
+  assert.equal(all.series.length, 7, 'zero-fills all 7 days in the week range')
+  assert.equal(all.models.find((m) => m.model === 'gpt-5.4')?.hasOverride, true)
+
+  const codexOnly = aggregateT3Usage(summary, new Set(['antigravity']))
+  assert.equal(codexOnly.totalTokens, 55_000)
+  assert.equal(Math.round(codexOnly.costUsd * 100), 45)
+  assert.equal(codexOnly.models.length, 1)
+  assert.equal(codexOnly.models[0]!.model, 'gpt-5.4')
+})

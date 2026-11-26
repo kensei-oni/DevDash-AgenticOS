@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useNavigate } from '@tanstack/react-router'
-import { ChevronDown, LogIn, Plug, Plus, RotateCw } from 'lucide-react'
+import { Link, useNavigate } from '@tanstack/react-router'
+import { ChevronDown, Gauge, LogIn, Plug, Plus, RotateCw } from 'lucide-react'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { confirmAction } from '@/components/app/confirm'
 import { toast } from '@/lib/toast'
@@ -169,6 +169,9 @@ function T3CodeSection({ agent, onTerminal }: { agent: Agent | undefined; onTerm
                   <LogIn />Pair T3 app
                 </Button>
               )}
+              <Button size="sm" variant="outline" asChild>
+                <Link to="/usage"><Gauge />Usage</Link>
+              </Button>
               <Button size="sm" variant="outline" disabled={busy} onClick={() => refresh.mutate()}>
                 <RotateCw className={refresh.isPending ? 'animate-spin' : ''} />Refresh
               </Button>

@@ -19,6 +19,8 @@ import {
   type SupervisorTarget,
 } from './t3-supervisor.ts'
 import { T3Client, configPath, readConfig, type T3CallOptions } from './t3-client.ts'
+import { closeUsageClient, consumeResetCredit, getUsageLimits, getUsageSummary, refreshUsageRates, revokeUsageSession, saveUsagePricing } from './t3-usage.ts'
+export { consumeResetCredit, getUsageLimits, getUsageSummary, refreshUsageRates, saveUsagePricing }
 
 type Model = { id: string; label?: string | null; options?: { id: string; values: (string | boolean)[] }[] | null }
 export type Capabilities = {
@@ -106,6 +108,7 @@ function acquireSharedClient(): { entry: SharedClientEntry; reused: boolean } {
     return { entry: sharedClient, reused: sharedClient.ready }
   }
   closeSharedClient()
+  closeUsageClient()
   const entry: SharedClientEntry = { key, generation, client: new T3Client(), ready: false }
   sharedClient = entry
   return { entry, reused: false }
@@ -726,6 +729,7 @@ export async function disconnectMember() {
     throw new Error(msg.split('\n')[0] || 'Could not disconnect T3 Code.')
   }
   const parsed = JSON.parse(stdout.trim()) as { removed: boolean; revoked: boolean }
+  await revokeUsageSession().catch(() => {})
   invalidateInfo()
   return parsed
 }

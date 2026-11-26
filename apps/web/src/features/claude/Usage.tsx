@@ -1,8 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
+import { ArrowUpRight } from 'lucide-react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { api, unwrap } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { ErrorAlert } from '../auth/LoginPage'
+import type { Harness } from './harness'
+import { computeWindowPace, formatResetCountdown, providerColor, providerLabel, t3UsageLimitsQuery } from './t3-usage'
 
 type Limit = { kind: string; percent: number | null; severity?: string; resets_at: string | null; is_active?: boolean; scope?: { model?: { display_name?: string | null } | null } | null }
 type Window = { utilization: number | null; resets_at: string | null } | null
@@ -67,19 +71,136 @@ function resets(iso: string | null) {
 }
 
 /**
- * This session's own usage (when a session is in view) above the Claude plan limits behind its profile — the
- * limits being the same as /usage in Claude Code. Used on the session page; the session block is only shown
- * where there is a session to show it for.
+ * This session's own usage (when a session is in view) above the plan/provider limits:
+ * - Claude Code sessions show Claude plan limits (/usage in Claude Code).
+ * - T3 Code sessions show live T3 Code provider rate limits + a direct link to /usage (Limits, Tokens & Price).
+ * - OpenCode sessions show only the session's own cost and tokens.
  */
-export function PlanUsage({ profile, sessionId, className, limits = true }: { profile: string; sessionId?: string; className?: string; limits?: boolean }) {
+export function PlanUsage({
+  profile,
+  sessionId,
+  className,
+  limits = true,
+  harness,
+  model,
+}: {
+  profile: string
+  sessionId?: string
+  className?: string
+  limits?: boolean
+  harness?: Harness
+  model?: string | null
+}) {
   return (
     <div className={cn('flex flex-col gap-4', className)}>
       {sessionId && <SessionUsage id={sessionId} />}
-      {/* Plan limits are a Claude plan's; other agents bill by their providers. */}
-      {limits && <div className="flex flex-col gap-3">
-        {sessionId && <h3 className="text-xs font-medium text-muted-foreground">Plan limits</h3>}
-        <PlanLimits profile={profile} />
-      </div>}
+      {harness === 't3code' ? (
+        <div className="flex flex-col gap-3">
+          {sessionId && (
+            <div className="flex items-baseline justify-between gap-2">
+              <h3 className="text-xs font-medium text-muted-foreground">T3 Code limits</h3>
+              <Link to="/usage" className="inline-flex items-center gap-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground">
+                Tokens &amp; price<ArrowUpRight className="size-3" />
+              </Link>
+            </div>
+          )}
+          <T3SessionLimits model={model} />
+        </div>
+      ) : (
+        limits && (
+          <div className="flex flex-col gap-3">
+            {sessionId && <h3 className="text-xs font-medium text-muted-foreground">Plan limits</h3>}
+            <PlanLimits profile={profile} />
+          </div>
+        )
+      )}
+    </div>
+  )
+}
+
+function modelDriver(model: string | null | undefined): string | null {
+  if (!model || !model.includes('/')) return null
+  const prefix = model.slice(0, model.indexOf('/')).trim()
+  if (!prefix) return null
+  if (prefix === 'claude' || prefix === 'anthropic') return 'claudeAgent'
+  if (prefix === 'openai') return 'codex'
+  return prefix
+}
+
+function T3SessionLimits({ model }: { model?: string | null }) {
+  const q = useQuery(t3UsageLimitsQuery())
+  if (q.isPending) return <div className="flex flex-col gap-3">{[0, 1].map((i) => <Skeleton key={i} className="h-9" />)}</div>
+  if (q.error) return <ErrorAlert error={q.error} />
+  if (!q.data.connected) {
+    return <p className="text-xs text-muted-foreground">T3 Code is not connected yet.</p>
+  }
+
+  const activeDriver = modelDriver(model)
+  const withWindows = q.data.accounts.filter((a) => a.windows.length > 0)
+  if (!withWindows.length) {
+    return (
+      <div className="flex flex-col gap-2 text-xs text-muted-foreground">
+        <p>No live rate-limit windows reported by your T3 Code providers right now.</p>
+        <Link to="/usage" className="inline-flex items-center gap-1 font-medium text-foreground hover:underline">
+          Open T3 Usage<ArrowUpRight className="size-3" />
+        </Link>
+      </div>
+    )
+  }
+
+  const ordered = [...withWindows].sort((a, b) => {
+    const aMatch = activeDriver && a.driver === activeDriver ? 0 : 1
+    const bMatch = activeDriver && b.driver === activeDriver ? 0 : 1
+    return aMatch - bMatch
+  })
+
+  return (
+    <div className="flex flex-col gap-3.5">
+      {ordered.map((acct) => {
+        const color = providerColor(acct.driver, acct.accentColor)
+        return (
+          <div key={acct.id} className="flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="inline-flex min-w-0 items-center gap-1.5 font-medium">
+                <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+                <span className="truncate">{acct.displayName || acct.label || providerLabel(acct.driver)}</span>
+                {acct.plan && <span className="shrink-0 text-muted-foreground">· {acct.plan}</span>}
+              </span>
+              {acct.resetCredits && acct.resetCredits.availableCount > 0 && (
+                <Link to="/usage" search={{ tab: 'limits' }} className="shrink-0 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground hover:text-foreground">
+                  {acct.resetCredits.availableCount} reset{acct.resetCredits.availableCount === 1 ? '' : 's'}
+                </Link>
+              )}
+            </div>
+            {acct.windows.map((w) => {
+              const pct = Math.max(0, Math.min(100, w.usedPercent))
+              const pace = computeWindowPace(w)
+              const tone = pct >= 90 ? 'bg-destructive' : pct >= 75 || pace?.state === 'fast' ? 'bg-attention' : 'bg-foreground/80'
+              const countdown = formatResetCountdown(w.resetsAt)
+              return (
+                <div key={w.id} className="flex flex-col gap-1">
+                  <div className="flex items-baseline justify-between gap-2 text-xs">
+                    <span className="text-muted-foreground">{w.label}</span>
+                    <span className="tabular-nums text-muted-foreground">{Math.round(pct)}%</span>
+                  </div>
+                  <div className="relative h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label={`${acct.label} ${w.label}`} aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+                    <div className={cn('h-full rounded-full', tone)} style={{ width: `${pct}%` }} />
+                    {pace && (
+                      <span
+                        aria-hidden
+                        title={`Steady pace: ${Math.round(100 - pace.timeLeftPercent)}%`}
+                        className="absolute inset-y-0 w-0.5 bg-foreground/60"
+                        style={{ left: `${Math.max(1, Math.min(99, 100 - pace.timeLeftPercent))}%` }}
+                      />
+                    )}
+                  </div>
+                  {countdown && <span className="text-[11px] text-muted-foreground">{countdown}</span>}
+                </div>
+              )
+            })}
+          </div>
+        )
+      })}
     </div>
   )
 }

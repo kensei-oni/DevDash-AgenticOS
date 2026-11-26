@@ -11,6 +11,7 @@ import { handleAppLinksAndDownloads, inShell } from './lib/shell'
 import { getTheme, setTheme } from './lib/theme'
 import { validateActivitySearch } from './features/autopilot/search'
 import { validateSubagentsSearch } from './features/subagents/data'
+import { validateT3UsageSearch } from './features/claude/t3-usage'
 import './styles.css'
 
 setTheme(getTheme())
@@ -68,6 +69,7 @@ const autopilotActivity = createRoute({
 })
 const autopilot = createRoute({ getParentRoute: () => app, path: '/autopilot', component: lazy(() => import('./features/autopilot/AutopilotPage'), 'AutopilotPage') })
 const subagents = createRoute({ getParentRoute: () => app, path: '/subagents', validateSearch: validateSubagentsSearch, component: lazy(() => import('./features/subagents/SubagentsPage'), 'SubagentsPage') })
+const t3Usage = createRoute({ getParentRoute: () => app, path: '/usage', validateSearch: validateT3UsageSearch, component: lazy(() => import('./features/claude/T3UsagePage'), 'T3UsagePage') })
 const more = createRoute({ getParentRoute: () => app, path: '/more', component: lazy(() => import('./features/more/MorePage'), 'MorePage') })
 const mcps = createRoute({ getParentRoute: () => app, path: '/mcps', component: lazy(() => import('./features/skills/McpsPage'), 'McpsPage') })
 const mcpCreateAny = createRoute({ getParentRoute: () => app, path: '/mcps/add', component: lazy(() => import('./features/skills/McpsPage'), 'McpCreatePage') })
@@ -140,7 +142,7 @@ const legacyClaude = createRoute({
 })
 
 const router = createRouter({
-  routeTree: root.addChildren([login, invite, storageCallback, app.addChildren([home, claude.addChildren([claudeIndex, claudeSetup, claudeSession]), legacyClaude, terminal, files, vaultRoute, network, pc, storage, browserRoute, serverRoute, services, service, serviceView, projects, project, projectSkill, skills, mcps, mcpCreateAny, mcpCreate, mcpDetail, skillReview, providerSkill, skill, teamRole, teamThreads, teamThread, approvals, approvalsProject, buildRun, tasks, task, tools, tool, notes, note, members, account, more, autopilot, autopilotActivity, subagents])]),
+  routeTree: root.addChildren([login, invite, storageCallback, app.addChildren([home, claude.addChildren([claudeIndex, claudeSetup, claudeSession]), legacyClaude, terminal, files, vaultRoute, network, pc, storage, browserRoute, serverRoute, services, service, serviceView, projects, project, projectSkill, skills, mcps, mcpCreateAny, mcpCreate, mcpDetail, skillReview, providerSkill, skill, teamRole, teamThreads, teamThread, approvals, approvalsProject, buildRun, tasks, task, tools, tool, notes, note, members, account, more, autopilot, autopilotActivity, subagents, t3Usage])]),
   context: { queryClient },
   defaultPreload: 'intent',
 })

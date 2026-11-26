@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, Outlet, useNavigate, useRouterState } from '@tanstack/react-router'
 import {
   Bot, Cable, BookOpenCheck,
-  Activity, ArrowLeftRight, ChevronsUpDown, Cloud, Download, Ellipsis, FolderGit2, Globe, HardDrive, House, Inbox, KeyRound, ListTodo, LogOut, Monitor, Moon, Network, Plane, PocketKnife, Search, Server, Settings, Sparkles, SquareTerminal, StickyNote, Sun, Users,
+  Activity, ArrowLeftRight, ChevronsUpDown, Cloud, Download, Ellipsis, FolderGit2, Gauge, Globe, HardDrive, House, Inbox, KeyRound, ListTodo, LogOut, Monitor, Moon, Network, Plane, PocketKnife, Search, Server, Settings, Sparkles, SquareTerminal, StickyNote, Sun, Users,
 } from 'lucide-react'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup,
@@ -42,6 +42,7 @@ const NAV: { label?: string; items: NavItem[] }[] = [
     { to: '/projects', label: 'Projects', icon: FolderGit2 },
     { to: '/tasks', label: 'Tasks', icon: ListTodo },
     { to: '/sessions', label: 'Sessions', icon: Sparkles },
+    { to: '/usage', label: 'T3 Usage', icon: Gauge },
     { to: '/subagents', label: 'Subagents', icon: Bot },
     { to: '/skills', label: 'Skills', icon: BookOpenCheck },
     { to: '/mcps', label: 'MCP servers', icon: Cable },

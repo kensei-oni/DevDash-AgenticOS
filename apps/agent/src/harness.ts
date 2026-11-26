@@ -886,6 +886,11 @@ export async function disconnectT3() {
   for (const key of modelCache.keys()) if (key.startsWith('t3code:')) modelCache.delete(key)
   return res
 }
+export const t3UsageLimits = (opts?: { refresh?: boolean }) => t3code.getUsageLimits(opts)
+export const t3UsageSummary = (opts?: { period?: 'day' | 'week' | 'month' | 'quarter'; timeZone?: string; refresh?: boolean }) => t3code.getUsageSummary(opts)
+export const t3RefreshUsageRates = () => t3code.refreshUsageRates()
+export const t3SaveUsagePricing = (input: Parameters<typeof t3code.saveUsagePricing>[0]) => t3code.saveUsagePricing(input)
+export const t3ConsumeResetCredit = (input: Parameters<typeof t3code.consumeResetCredit>[0]) => t3code.consumeResetCredit(input)
 /** Commands and models for a profile of an agent: its models from every provider the profile has connected. */
 export async function commandsAndModels(harness: string, profile: string, selected?: string, supervisor = false) {
   if (!PROFILE_RE.test(profile)) throw new Error('invalid profile')

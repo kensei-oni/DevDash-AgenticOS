@@ -378,8 +378,8 @@ export function SessionView({ id, embedded }: { id: string; embedded?: Embedded 
       {isOwner && <TailnetDialog open={tailnet} onOpenChange={setTailnet} s={s} onUpdate={(v) => update.mutateAsync(v)} />}
       {isOwner && <ShareDialog open={share} onOpenChange={setShare} s={s} me={me.id} people={info.data!.people} writers={info.data!.writers} onSaved={() => void info.refetch()} />}
       {isOwner && (
-        <ResponsiveDialog open={usage} onOpenChange={setUsage} title="Usage" description={HARNESS[harnessOf(s)].planLimits ? "This session's own cost and tokens, and your Claude plan's limits (the same as /usage in Claude Code)." : "This session's own cost and tokens, as its model provider prices them."}>
-          <PlanUsage profile={s.profile} sessionId={s.id} className="pb-2 text-sm" limits={HARNESS[harnessOf(s)].planLimits} />
+        <ResponsiveDialog open={usage} onOpenChange={setUsage} title="Usage" description={harnessOf(s) === 't3code' ? "This session's own cost and tokens, plus live rate limits from your T3 Code providers." : HARNESS[harnessOf(s)].planLimits ? "This session's own cost and tokens, and your Claude plan's limits (the same as /usage in Claude Code)." : "This session's own cost and tokens, as its model provider prices them."}>
+          <PlanUsage profile={s.profile} sessionId={s.id} className="pb-2 text-sm" limits={HARNESS[harnessOf(s)].planLimits} harness={harnessOf(s)} model={s.model} />
         </ResponsiveDialog>
       )}
     </div>
@@ -488,7 +488,7 @@ function SessionAside({ s, blocks, isOwner }: { s: Session; blocks: ReturnType<t
       {isOwner && (
         <section className="flex flex-col gap-2">
           <h2 className="font-medium">Usage</h2>
-          <PlanUsage profile={s.profile} sessionId={s.id} limits={HARNESS[harnessOf(s)].planLimits} />
+          <PlanUsage profile={s.profile} sessionId={s.id} limits={HARNESS[harnessOf(s)].planLimits} harness={harnessOf(s)} model={s.model} />
         </section>
       )}
       <section className="flex flex-col gap-2">

@@ -1443,6 +1443,146 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
     /** Revokes this member's DevDash T3 OAuth session and removes their ~/.config/devdash/t3code.json. */
     disconnectT3: (user: User) =>
       agents.request<{ removed: boolean; revoked: boolean }>(user.username, { op: 't3.disconnect' }, 25_000),
+    /** Live rate-limit & quota windows across providers connected in this member's T3 Code instance. */
+    t3UsageLimits: (user: User, refresh = false) =>
+      agents.request<{
+        connected: boolean
+        checkedAt: string
+        accounts: {
+          id: string
+          instanceId: string | null
+          driver: string
+          label: string
+          displayName: string | null
+          accentColor: string | null
+          status: string
+          plan: string | null
+          email: string | null
+          sourceLabel: string | null
+          checkedAt: string | null
+          windows: {
+            id: string
+            kind: 'session' | 'weekly' | 'monthly' | 'other'
+            label: string
+            usedPercent: number
+            remainingPercent: number
+            resetsAt: string | null
+            windowDurationMins: number | null
+          }[]
+          zeroSpendCap: boolean
+          resetCredits: {
+            availableCount: number
+            nextExpiresAt: string | null
+            nextCreditId: string | null
+            options: {
+              creditId: string
+              label: string
+              description: string
+              availableCount: number
+              expiresAt: string | null
+            }[]
+          } | null
+          resetCreditInput: ({ instanceId: string; creditId?: string } | { sourceId: string; accountId: string; creditId: string }) | null
+          externalUsage: { label: string; url: string } | null
+          unavailable: { reason: 'unsupported' | 'probeFailed'; message: string | null } | null
+        }[]
+        notices: string[]
+        error?: string
+      }>(user.username, { op: 't3.usage.limits', ...(refresh ? { refresh: true } : {}) }, 35_000),
+    /** Processed token & price buckets from this member's T3 Code usage scanner. */
+    t3UsageSummary: (user: User, opts: { period: 'day' | 'week' | 'month' | 'quarter'; timeZone: string; refresh?: boolean }) =>
+      agents.request<{
+        connected: boolean
+        period: 'day' | 'week' | 'month' | 'quarter'
+        resolution: 'hour' | 'day'
+        timeZone: string
+        sinceDay: string
+        untilDay: string
+        sinceTime?: string
+        untilTime?: string
+        readAt: string
+        scanDurationMs: number
+        buckets: {
+          day: string
+          hourStart?: string
+          provider: string
+          model: string
+          sourcePath?: string
+          totals: {
+            uncachedInputTokens: number
+            cachedInputTokens: number
+            cacheCreationTokens: number
+            outputTokens: number
+            reasoningTokens: number
+          }
+          costUsd: number
+          cacheSavingsUsd: number
+          categoryCostUsd?: { input: number; cacheRead: number; cacheWrite: number; output: number }
+          fastCostUsd?: number
+          ultrafastCostUsd?: number
+          speedPremiumUsd?: number
+          costSource: 'providerReported' | 'modelPriced' | 'unpriced'
+          records: number
+          unpricedRecords: number
+          unpricedTokens?: number
+          sessions: number
+        }[]
+        sources: {
+          fingerprint: { hostId: string; provider: string; resolvedHomePath: string; volumeId: string; physicalSourceId?: string }
+          status: 'ok' | 'missing' | 'partial' | 'failed'
+          scannedFiles: number
+          skippedFiles: number
+          malformedRecords: number
+          distinctSessions: number
+          message: string | null
+          refreshing?: boolean
+        }[]
+        pricing: { status: 'fresh' | 'cached' | 'unavailable'; source: string; fetchedAt: string | null; knownModels: number }
+        priceOverrides: Record<string, {
+          inputCostPerMillionTokens: number
+          outputCostPerMillionTokens: number
+          cacheReadCostPerMillionTokens?: number
+          cacheWriteCostPerMillionTokens?: number
+        }>
+        modelAliases: Record<string, string>
+        error?: string
+      }>(user.username, { op: 't3.usage.summary', ...opts }, 40_000),
+    t3RefreshUsageRates: (user: User) =>
+      agents.request<{ pricing: { status: 'fresh' | 'cached' | 'unavailable'; source: string; fetchedAt: string | null; knownModels: number } }>(
+        user.username,
+        { op: 't3.usage.rates.refresh' },
+        30_000,
+      ),
+    t3SaveUsagePricing: (
+      user: User,
+      input: {
+        priceOverrides?: Record<string, {
+          inputCostPerMillionTokens: number
+          outputCostPerMillionTokens: number
+          cacheReadCostPerMillionTokens?: number
+          cacheWriteCostPerMillionTokens?: number
+        } | null>
+        modelAliases?: Record<string, string | null>
+      },
+    ) =>
+      agents.request<{
+        priceOverrides: Record<string, {
+          inputCostPerMillionTokens: number
+          outputCostPerMillionTokens: number
+          cacheReadCostPerMillionTokens?: number
+          cacheWriteCostPerMillionTokens?: number
+        }>
+        modelAliases: Record<string, string>
+      }>(user.username, { op: 't3.usage.pricing.save', ...input }, 20_000),
+    t3ConsumeResetCredit: (
+      user: User,
+      input: { instanceId: string; creditId?: string } | { sourceId: string; accountId: string; creditId: string },
+    ) =>
+      agents.request<{ outcome: 'reset' | 'nothingToReset' | 'noCredit' | 'alreadyRedeemed'; warning?: string }>(
+        user.username,
+        { op: 't3.usage.reset-credit', input },
+        25_000,
+      ),
     createProfile: (user: User, name: string, harness: Harness = 'claude') => agents.request(user.username, { op: 'claude.profile.create', name, ...(harness !== 'claude' ? { harness } : {}) }),
     memoryHealth: (user: User) => memoryHealth(agents, user.username),
     restartMemory: async (user: User) => {

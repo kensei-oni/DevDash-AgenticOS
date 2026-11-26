@@ -128,6 +128,75 @@ export async function memberFetch(raw: string, init: MemberRequest): Promise<Res
   return ownedFetch(url, init)
 }
 
+/** Local T3 auth & WebSocket ticket endpoints on the member's verified loopback instance. */
+export function memberAuthFetch(url: URL, init: MemberRequest): Promise<Response> {
+  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.username || url.password || url.search || url.hash) {
+    throw new Error('Unsupported local T3 Code auth URL.')
+  }
+  if (!['/oauth/token', '/api/auth/websocket-ticket', '/api/auth/websocket-ticket/rpc'].includes(url.pathname)) {
+    throw new Error('Unsupported local T3 Code auth endpoint.')
+  }
+  return ownedFetch(url, init)
+}
+
+export type MemberUpgradeResult =
+  | { kind: 'upgraded'; socket: Socket; head: Buffer }
+  | { kind: 'http'; status: number; body: string }
+
+/** Verified member-owned WebSocket HTTP Upgrade to 127.0.0.1:<port>/ws before sending wsTicket. */
+export async function memberWsUpgrade(url: URL, headers: Record<string, string>, signal?: AbortSignal): Promise<MemberUpgradeResult> {
+  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.pathname !== '/ws' || url.username || url.password || url.hash) {
+    throw new Error('Unsupported local T3 Code WebSocket endpoint.')
+  }
+  const endpoint = new URL('/mcp', url).href
+  await assertMemberEndpoint(endpoint)
+  if (signal?.aborted) throw signal.reason
+  const agent = new Agent({ keepAlive: false })
+  agent.createConnection = (_options, callback) => {
+    const socket = createConnection({ host: '127.0.0.1', port: Number(url.port || 80) })
+    let handedOff = false
+    const aborted = () => finish(new DOMException('The operation was aborted.', 'AbortError'))
+    const finish = (error: Error | null) => {
+      if (handedOff) return
+      handedOff = true
+      signal?.removeEventListener('abort', aborted)
+      socket.removeListener('error', failed)
+      if (error) socket.destroy()
+      callback!(error, socket)
+    }
+    const failed = (error: Error) => finish(error)
+    socket.once('error', failed)
+    signal?.addEventListener('abort', aborted, { once: true })
+    socket.once('connect', () => {
+      void assertMemberConnection(socket).then(() => finish(null), (error: Error) => finish(error))
+    })
+    if (signal?.aborted) aborted()
+    return undefined
+  }
+  return new Promise<MemberUpgradeResult>((resolve, reject) => {
+    const req = request(url, {
+      method: 'GET',
+      headers: { ...headers, Connection: 'Upgrade', Upgrade: 'websocket' },
+      agent,
+      signal,
+    })
+    req.once('upgrade', (_res, socket, head) => {
+      resolve({ kind: 'upgraded', socket, head })
+    })
+    req.once('response', (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (c: Buffer) => chunks.push(c))
+      res.on('end', () => {
+        agent.destroy()
+        resolve({ kind: 'http', status: res.statusCode ?? 500, body: Buffer.concat(chunks).toString('utf8') })
+      })
+      res.once('error', (err) => { agent.destroy(); reject(err) })
+    })
+    req.once('error', (err) => { agent.destroy(); reject(err) })
+    req.end()
+  })
+}
+
 /** Only the stateless text and model catalog operations of a locally spawned OpenCode server. */
 export function openCodeMemberFetch(url: URL, init: MemberRequest): Promise<Response> {
   if (!['/api/experimental/generate/text', '/api/model'].includes(url.pathname) || url.search || url.hash) throw new Error('Unsupported supervisor operation.')

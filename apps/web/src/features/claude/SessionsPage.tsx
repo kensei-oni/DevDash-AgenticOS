@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'rea
 import { UserAvatar } from '@/components/app/user-avatar'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
-import { Archive, ArrowLeft, ChevronRight, Plus, Settings2 } from 'lucide-react'
+import { Archive, ArrowLeft, ChevronRight, Gauge, Plus, Settings2 } from 'lucide-react'
 import { FollowGlyph } from '../assistant/Following'
 import { StatusLight } from '@/components/app/brand'
 import { Orb } from '@/components/app/orb'
@@ -49,6 +49,7 @@ export function SessionsPage() {
     <>
       <PageHeader title={archived ? 'Archived sessions' : 'Sessions'}
         actions={<>
+          <Button variant="ghost" size="icon" asChild aria-label="T3 Code usage" title="T3 Code usage (limits, tokens & price)"><Link to="/usage"><Gauge /></Link></Button>
           <Button variant="ghost" size="icon" asChild aria-label="Agent setup"><Link to="/sessions/setup"><Settings2 /></Link></Button>
           <Button size="sm" onClick={() => setCreating(true)}><Plus />New</Button>
         </>} />

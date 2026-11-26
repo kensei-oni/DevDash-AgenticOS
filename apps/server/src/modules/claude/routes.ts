@@ -84,6 +84,27 @@ const DefaultsInput = z.object({
   harness: Harness.default('claude'), profile: z.string().max(21), model: Model, effort: Effort, permission_mode: Mode, open_in: z.enum(['chat', 'cli']),
 }).refine(initialEffortAllowed, unknownEffort)
 
+const T3PriceOverrideSchema = z.object({
+  inputCostPerMillionTokens: z.number().min(0).max(1_000_000),
+  outputCostPerMillionTokens: z.number().min(0).max(1_000_000),
+  cacheReadCostPerMillionTokens: z.number().min(0).max(1_000_000).optional(),
+  cacheWriteCostPerMillionTokens: z.number().min(0).max(1_000_000).optional(),
+})
+
+const T3PricingBody = z.object({
+  priceOverrides: z.record(z.string().trim().min(1).max(200), T3PriceOverrideSchema.nullable()).optional(),
+  modelAliases: z.record(z.string().trim().min(1).max(200), z.string().trim().min(1).max(200).nullable()).optional(),
+})
+
+const T3ResetCreditBody = z.union([
+  z.object({ instanceId: z.string().trim().min(1).max(120), creditId: z.string().trim().min(1).max(200).optional() }),
+  z.object({
+    sourceId: z.string().trim().min(1).max(120),
+    accountId: z.string().trim().min(1).max(200),
+    creditId: z.string().trim().min(1).max(200),
+  }),
+])
+
 export function claudeRoutes(claude: ClaudeService, mw: ReturnType<typeof authMiddleware>) {
   return new Hono<AuthEnv>()
     .use(mw.requireUser)
@@ -155,6 +176,26 @@ export function claudeRoutes(claude: ClaudeService, mw: ReturnType<typeof authMi
     .post('/signin-callback', json(z.object({ url: z.string().min(1).max(4000) })), async (c) => c.json(await claude.finishSignIn(c.get('user'), c.req.valid('json').url)))
     .post('/t3/connect', async (c) => c.json(await claude.connectT3(c.get('user'))))
     .post('/t3/disconnect', async (c) => c.json(await claude.disconnectT3(c.get('user'))))
+    .get(
+      '/t3/usage/limits',
+      query(z.object({ refresh: z.enum(['true', 'false']).optional() })),
+      async (c) => c.json(await claude.t3UsageLimits(c.get('user'), c.req.valid('query').refresh === 'true')),
+    )
+    .get(
+      '/t3/usage/summary',
+      query(z.object({
+        period: z.enum(['day', 'week', 'month', 'quarter']).default('month'),
+        tz: z.string().max(100).default('UTC'),
+        refresh: z.enum(['true', 'false']).optional(),
+      })),
+      async (c) => {
+        const q = c.req.valid('query')
+        return c.json(await claude.t3UsageSummary(c.get('user'), { period: q.period, timeZone: q.tz, refresh: q.refresh === 'true' }))
+      },
+    )
+    .post('/t3/usage/rates/refresh', async (c) => c.json(await claude.t3RefreshUsageRates(c.get('user'))))
+    .put('/t3/usage/pricing', json(T3PricingBody), async (c) => c.json(await claude.t3SaveUsagePricing(c.get('user'), c.req.valid('json'))))
+    .post('/t3/usage/reset-credit', json(T3ResetCreditBody), async (c) => c.json(await claude.t3ConsumeResetCredit(c.get('user'), c.req.valid('json'))))
     .post('/profiles', json(z.object({ name: z.string().max(21), harness: Harness.default('claude') })), async (c) => {
       await claude.createProfile(c.get('user'), c.req.valid('json').name, c.req.valid('json').harness)
       return c.json({ ok: true })

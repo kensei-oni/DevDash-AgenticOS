@@ -148,6 +148,18 @@ const ops: Record<string, (r: Req) => Promise<unknown> | unknown> = {
     ...(typeof r.baseDir === 'string' && r.baseDir ? { baseDir: r.baseDir } : {}),
   }),
   't3.disconnect': async () => harness.disconnectT3(),
+  't3.usage.limits': async (r) => harness.t3UsageLimits({ refresh: r.refresh === true }),
+  't3.usage.summary': async (r) => harness.t3UsageSummary({
+    period: typeof r.period === 'string' ? r.period as 'day' | 'week' | 'month' | 'quarter' : undefined,
+    timeZone: typeof r.timeZone === 'string' ? r.timeZone : undefined,
+    refresh: r.refresh === true,
+  }),
+  't3.usage.rates.refresh': async () => harness.t3RefreshUsageRates(),
+  't3.usage.pricing.save': async (r) => harness.t3SaveUsagePricing({
+    priceOverrides: r.priceOverrides as never,
+    modelAliases: r.modelAliases as never,
+  }),
+  't3.usage.reset-credit': async (r) => harness.t3ConsumeResetCredit(r.input as never),
   'claude.profiles': async (r) => {
     if (r.refresh === true) harness.refreshT3()
     const [profiles, agents] = await Promise.all([
