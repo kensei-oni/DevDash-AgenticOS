@@ -40,7 +40,7 @@ export type Block =
   | ToolBlock
   | { kind: 'command'; key: string; name: string; args?: string; output?: string }
   | {
-      kind: 'result'; key: string; ok: boolean; seconds: number; cost?: number; at?: number; stopped?: boolean
+      kind: 'result'; key: string; ok: boolean; seconds: number; cost?: number; at?: number; stopped?: boolean; error?: string
       /** Tokens the model read (fresh, from cache, written to cache) and wrote for the whole answer. */
       tokens?: { input: number; cacheRead: number; cacheWrite: number; output: number }
       model?: string; steps?: number
@@ -174,9 +174,17 @@ export function buildTranscript(raws: Raw[]): Block[] {
       // DevDash adds the answer's own cost and model: Claude Code's are the session's running total and every model it used.
       const model = typeof r.turn_model === 'string' ? r.turn_model : undefined
       const cost = typeof r.turn_cost_usd === 'number' ? r.turn_cost_usd : undefined
+      const ok = r.subtype === 'success' && r.is_error !== true
+      const stopped = typeof r.terminal_reason === 'string' && r.terminal_reason.startsWith('aborted')
+      const error = !ok && !stopped
+        ? (typeof r.result === 'string' && r.result.trim()
+            ? r.result.trim()
+            : Array.isArray(r.errors)
+              ? (r.errors as unknown[]).filter((x): x is string => typeof x === 'string' && !!x.trim()).join('\n')
+              : undefined) || undefined
+        : undefined
       top.push({
-        kind: 'result', key, ok: r.subtype === 'success' && r.is_error !== true,
-        stopped: typeof r.terminal_reason === 'string' && r.terminal_reason.startsWith('aborted'),
+        kind: 'result', key, ok, stopped, ...(error ? { error } : {}),
         seconds: Math.round(Number(r.duration_ms ?? 0) / 1000), cost,
         at: when(r),
         tokens: u ? { input: u.input_tokens ?? 0, cacheRead: u.cache_read_input_tokens ?? 0, cacheWrite: u.cache_creation_input_tokens ?? 0, output: u.output_tokens ?? 0 } : undefined,

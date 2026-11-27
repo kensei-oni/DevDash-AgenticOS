@@ -150,23 +150,30 @@ function ResultLine({ b, reply }: { b: Extract<Block, { kind: 'result' }>; reply
   ].filter(Boolean).join('\n') : undefined
   const tone = b.stopped ? 'text-muted-foreground' : b.ok ? 'text-muted-foreground' : 'text-destructive'
   return (
-    // A sentence, then the meter: "Done at 14:02 after 51s", and quieter, what it read and wrote and cost.
-    <p className={cn('flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs tabular-nums', tone)} title={detail}>
-      <span className="flex items-center gap-1.5">
-        {b.ok || b.stopped ? <Check className="size-3.5" /> : <CircleAlert className="size-3.5" />}
-        <span>
-          {b.stopped ? 'Stopped' : b.ok ? 'Done' : 'Stopped with an error'}
-          {b.at && <> at <time dateTime={new Date(b.at).toISOString()}>{clock(b.at)}</time></>} after {took(b.seconds)}
+    <div className="flex flex-col gap-1.5">
+      {/* A sentence, then the meter: "Done at 14:02 after 51s", and quieter, what it read and wrote and cost. */}
+      <p className={cn('flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs tabular-nums', tone)} title={detail}>
+        <span className="flex items-center gap-1.5">
+          {b.ok || b.stopped ? <Check className="size-3.5" /> : <CircleAlert className="size-3.5" />}
+          <span>
+            {b.stopped ? 'Stopped' : b.ok ? 'Done' : 'Stopped with an error'}
+            {b.at && <> at <time dateTime={new Date(b.at).toISOString()}>{clock(b.at)}</time></>} after {took(b.seconds)}
+          </span>
         </span>
-      </span>
-      {(t || b.cost !== undefined) && (
-        <span className="opacity-70">
-          {t && <>{kTokens(read)} in, {kTokens(t.output)} out</>}
-          {b.cost !== undefined && <>{t ? ', ' : ''}${b.cost < 0.01 ? b.cost.toFixed(3) : b.cost.toFixed(2)}</>}
-        </span>
+        {(t || b.cost !== undefined) && (
+          <span className="opacity-70">
+            {t && <>{kTokens(read)} in, {kTokens(t.output)} out</>}
+            {b.cost !== undefined && <>{t ? ', ' : ''}${b.cost < 0.01 ? b.cost.toFixed(3) : b.cost.toFixed(2)}</>}
+          </span>
+        )}
+        {reply && <CopyButton text={reply} label="Copy reply" className="-my-1" />}
+      </p>
+      {b.error && (
+        <p dir="auto" className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs leading-relaxed text-destructive break-words whitespace-pre-wrap">
+          {b.error}
+        </p>
       )}
-      {reply && <CopyButton text={reply} label="Copy reply" className="-my-1" />}
-    </p>
+    </div>
   )
 }
 

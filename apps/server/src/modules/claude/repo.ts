@@ -54,7 +54,7 @@ export type SessionRow = {
 export type TurnRow = {
   session_id: string; result_uuid: string; after_uuid: string | null; prompt_uuid: string | null; ok: number
   duration_ms: number; cost_usd: number; turn_cost_usd: number | null; input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number
-  num_turns: number; model: string | null; created_at: number
+  num_turns: number; model: string | null; error: string | null; created_at: number
 }
 export type Comment = { id: number; body: string; createdAt: number; user: { id: number; name: string } }
 export type Defaults = { harness: string; profile: string; model: string | null; effort: string | null; permission_mode: string; open_in: 'chat' | 'cli' }
@@ -92,7 +92,7 @@ export function claudeRepo(db: Db) {
     senders: db.prepare(`select m.message_uuid, u.id, u.name from claude_message_senders m join users u on u.id = m.user_id where m.session_id = ?`),
     lastSender: db.prepare(`select u.id, u.name from claude_message_senders m join users u on u.id = m.user_id where m.session_id = ? order by m.rowid desc limit 1`),
     insertTurn: db.prepare(`insert or ignore into claude_turns (session_id, result_uuid, after_uuid, prompt_uuid, ok, duration_ms, cost_usd, turn_cost_usd,
-      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, num_turns, model) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, num_turns, model, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     lastTotal: db.prepare(`select cost_usd from claude_turns where session_id = ? order by id desc limit 1`),
     turns: db.prepare(`select * from claude_turns where session_id = ? order by id`),
     writer: db.prepare(`select full_access from claude_session_writers where session_id = ? and user_id = ?`),
@@ -150,7 +150,7 @@ export function claudeRepo(db: Db) {
       Object.fromEntries((s.senders.all(sessionId) as { message_uuid: string; id: number; name: string }[]).map((r) => [r.message_uuid, { id: r.id, name: r.name }])),
     insertTurn: (t: Omit<TurnRow, 'created_at'>) => void s.insertTurn.run(
       t.session_id, t.result_uuid, t.after_uuid, t.prompt_uuid, t.ok, t.duration_ms, t.cost_usd, t.turn_cost_usd,
-      t.input_tokens, t.output_tokens, t.cache_read_tokens, t.cache_write_tokens, t.num_turns, t.model),
+      t.input_tokens, t.output_tokens, t.cache_read_tokens, t.cache_write_tokens, t.num_turns, t.model, t.error ?? null),
     turns: (sessionId: string) => (s.turns.all(sessionId) as TurnRow[]).map((r) => ({ ...r })),
     /** The session's running total cost as of its last saved answer, or null before the first. */
     lastTotal: (sessionId: string) => (s.lastTotal.get(sessionId) as { cost_usd: number } | undefined)?.cost_usd ?? null,

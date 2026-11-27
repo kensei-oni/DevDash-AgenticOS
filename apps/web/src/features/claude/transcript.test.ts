@@ -114,3 +114,21 @@ test("a message the agent hasn't taken in yet shows as queued, one it never got 
   ])
   assert.deepEqual(blocks.map((b) => b.kind === 'user' && b.state), ['queued', 'lost', undefined])
 })
+
+test("failed result blocks preserve the error text while successful and stopped ones omit it", () => {
+  const blocks = buildTranscript([
+    { type: 'result', uuid: 'r1', subtype: 'error_during_execution', is_error: true, result: 'Lost contact with the DevDash-started T3 Code run.', duration_ms: 90608 },
+    { type: 'result', uuid: 'r2', subtype: 'error_during_execution', is_error: true, errors: ['Quota exceeded'], duration_ms: 5 },
+    { type: 'result', uuid: 'r3', subtype: 'error_during_execution', is_error: false, terminal_reason: 'aborted_by_user', result: 'Stopped.', duration_ms: 1000 },
+    { type: 'result', uuid: 'r4', subtype: 'success', is_error: false, result: 'All good', duration_ms: 2000 },
+  ])
+  assert.deepEqual(
+    blocks.map((b) => b.kind === 'result' && [b.ok, b.stopped, b.error]),
+    [
+      [false, false, 'Lost contact with the DevDash-started T3 Code run.'],
+      [false, false, 'Quota exceeded'],
+      [false, true, undefined],
+      [true, false, undefined],
+    ],
+  )
+})

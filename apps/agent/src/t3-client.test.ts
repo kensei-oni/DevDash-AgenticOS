@@ -5,8 +5,10 @@ import { T3Client, validateConfig } from './t3-client.ts'
 
 const token = 'test-secret-bearer'
 type Json = { id?: number; method: string; params?: Record<string, unknown> }
-async function server(onTool: (body: Json, res: ServerResponse) => void, options: { sse?: boolean } = {}) {
+async function server(onTool: (body: Json, res: ServerResponse, req: IncomingMessage) => void, options: { sse?: boolean } = {}) {
   const seen: { method: string; session?: string; protocol?: string }[] = []
+  let inits = 0
+  const currentSession = () => `session-${inits}`
   const http = createServer(async (req: IncomingMessage, res) => {
     assert.equal(req.headers.authorization, `Bearer ${token}`)
     seen.push({ method: req.method!, session: req.headers['mcp-session-id'] as string | undefined, protocol: req.headers['mcp-protocol-version'] as string | undefined })
@@ -15,16 +17,17 @@ async function server(onTool: (body: Json, res: ServerResponse) => void, options
     for await (const chunk of req) text += chunk
     const body = JSON.parse(text) as Json
     if (body.method === 'initialize') {
-      res.setHeader('mcp-session-id', 'session-1')
+      inits++
+      res.setHeader('mcp-session-id', currentSession())
       res.setHeader('content-type', 'application/json')
       res.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { protocolVersion: '2025-06-18' } }))
     } else if (body.method === 'notifications/initialized') {
-      assert.equal(req.headers['mcp-session-id'], 'session-1')
+      assert.equal(req.headers['mcp-session-id'], currentSession())
       res.writeHead(202).end()
     } else {
-      assert.equal(req.headers['mcp-session-id'], 'session-1')
+      assert.equal(req.headers['mcp-session-id'], currentSession())
       res.setHeader('content-type', options.sse ? 'text/event-stream' : 'application/json')
-      onTool(body, res)
+      onTool(body, res, req)
     }
   }).listen(0, '127.0.0.1')
   await new Promise<void>((r) => http.once('listening', r))
@@ -97,4 +100,25 @@ test('T3 MCP request timeout is bounded and a mutation is not retried', async ()
     await assert.rejects(client.call('t3_thread_send', { message: 'one' }), /timed out/)
     assert.equal(calls, 1)
   } finally { await client.close(); await s.close() }
+})
+
+test("T3 MCP automatically renews an expired session on HTTP 404", async () => {
+  let expiredOnce = false
+  const s = await server((body, res, req) => {
+    if (!expiredOnce && req.headers['mcp-session-id'] === 'session-1') {
+      expiredOnce = true
+      res.writeHead(404).end('Session not found')
+      return
+    }
+    res.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { structuredContent: { ok: true, session: req.headers['mcp-session-id'] } } }))
+  })
+  const client = new T3Client({ url: s.url, token })
+  try {
+    await client.connect()
+    const out = await client.call<{ ok: boolean; session: string }>('t3_project_list', { limit: 1 })
+    assert.deepEqual(out, { ok: true, session: 'session-2' })
+  } finally {
+    await client.close()
+    await s.close()
+  }
 })

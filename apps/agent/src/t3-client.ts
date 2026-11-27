@@ -150,7 +150,19 @@ export class T3Client {
 
   async call<T>(name: string, args: Record<string, unknown> = {}, options?: T3CallOptions): Promise<T> {
     await this.connect(options)
-    const result = await this.request('tools/call', { name, arguments: args }, false, options) as ToolResult
+    const hadSession = !!this.session
+    let result: ToolResult
+    try {
+      result = await this.request('tools/call', { name, arguments: args }, false, options) as ToolResult
+    } catch (err) {
+      // Streamable HTTP MCP returns 404 when mcp-session-id expired or T3 restarted; the tool never ran.
+      if (hadSession && err instanceof T3RequestError && err.httpStatus === 404) {
+        this.session = null
+        this.connected = false
+        await this.connect(options)
+        result = await this.request('tools/call', { name, arguments: args }, false, options) as ToolResult
+      } else throw err
+    }
     if (result?.isError) {
       const detail = result.content?.filter((c) => c.type === 'text').map((c) => c.text ?? '').join('\n')
       throw new T3RequestError(`T3 Code tool ${name} failed${detail ? `: ${this.clean(detail)}` : '.'}`, false)

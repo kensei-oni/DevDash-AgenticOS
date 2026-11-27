@@ -288,7 +288,7 @@ export class Transcriber {
   }
 
   /** The end of a turn: anything still unsaid, unfinished tool steps closed, and the result Claude Code would send. */
-  end(o: { stopReason: string; durationMs: number; costUsd: number | null; usage?: Usage | null; error?: string; fresh: boolean }) {
+  end(o: { stopReason: string; durationMs: number; costUsd: number | null; usage?: Usage | null; error?: string; fresh: boolean; promptUuid?: string }) {
     this.flush()
     for (const t of this.tools.values()) {
       if (t.used && !t.done) {
@@ -301,6 +301,7 @@ export class Transcriber {
     const u = o.usage ?? {}
     this.emit({
       type: 'result', uuid: randomUUID(), session_id: this.o.sessionId,
+      ...(o.promptUuid ? { user_message_uuid: o.promptUuid } : {}),
       subtype: ok ? 'success' : 'error_during_execution', is_error: !ok && o.stopReason !== 'cancelled',
       result: o.error ?? (o.stopReason === 'refusal' ? 'The model refused to answer.' : this.lastText),
       ...(o.stopReason === 'cancelled' ? { terminal_reason: 'aborted_by_user' } : {}),

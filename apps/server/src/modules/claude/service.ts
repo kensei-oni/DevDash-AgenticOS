@@ -346,21 +346,32 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
     if (prev !== null) return r.total_cost_usd >= prev ? r.total_cost_usd - prev : r.total_cost_usd
     return r.devdash_fresh ? r.total_cost_usd : null
   }
-  function saveTurn(sessionId: string, r: ResultMsg, cost: number | null) {
+  function saveTurn(sessionId: string, r: ResultMsg & { result?: unknown; errors?: unknown; terminal_reason?: string }, cost: number | null) {
     if (!r.uuid) return
     const u = r.usage ?? {}
+    const ok = r.subtype === 'success' && !r.is_error
+    const aborted = typeof r.terminal_reason === 'string' && r.terminal_reason.startsWith('aborted')
+    const rawError = !ok && !aborted
+      ? (typeof r.result === 'string' && r.result.trim()
+          ? r.result.trim()
+          : Array.isArray(r.errors)
+            ? r.errors.filter((x): x is string => typeof x === 'string' && !!x.trim()).join('\n')
+            : '')
+      : ''
     repo.insertTurn({
-      session_id: sessionId, result_uuid: r.uuid, after_uuid: lastUuid.get(sessionId) ?? null, prompt_uuid: r.user_message_uuid ?? null,
-      ok: r.subtype === 'success' && !r.is_error ? 1 : 0, duration_ms: Math.round(r.duration_ms ?? 0),
+      session_id: sessionId, result_uuid: r.uuid, after_uuid: lastUuid.get(sessionId) ?? r.user_message_uuid ?? null, prompt_uuid: r.user_message_uuid ?? null,
+      ok: ok ? 1 : 0, duration_ms: Math.round(r.duration_ms ?? 0),
       cost_usd: r.total_cost_usd ?? 0, turn_cost_usd: cost,
       input_tokens: u.input_tokens ?? 0, output_tokens: u.output_tokens ?? 0,
       cache_read_tokens: u.cache_read_input_tokens ?? 0, cache_write_tokens: u.cache_creation_input_tokens ?? 0,
       num_turns: r.num_turns ?? 0, model: lastModel.get(sessionId) ?? null,
+      error: rawError ? rawError.slice(0, 500) : null,
     })
   }
   /** A saved answer as the result message Claude Code sent at the time (what the browser shows under the answer). */
   const turnResult = (t: TurnRow) => ({
     type: 'result', uuid: t.result_uuid, subtype: t.ok ? 'success' : 'error', is_error: !t.ok,
+    ...(t.error ? { result: t.error } : {}),
     duration_ms: t.duration_ms, turn_cost_usd: t.turn_cost_usd, num_turns: t.num_turns, turn_model: t.model,
     usage: { input_tokens: t.input_tokens, output_tokens: t.output_tokens, cache_read_input_tokens: t.cache_read_tokens, cache_creation_input_tokens: t.cache_write_tokens },
     timestamp: new Date(t.created_at * 1000).toISOString(),
@@ -696,6 +707,7 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
       // If a teammate's request was running, it carries on under the same rules as before the restart.
       const last = repo.lastSender(s.id)
       const guest = last ? guestOf(last, s) : null
+      lastUuid.set(s.id, uuid)
       await agents.request(s.owner_username, {
         op: 'claude.send', launch: launch(s), uuid, guest,
         content: guest ? [guestNote(guest, s), ...content(RESUME_TEXT, [])] : content(RESUME_TEXT, []),
@@ -818,6 +830,7 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
         return []
       }
     }) : []
+    lastUuid.set(s.id, uuid)
     await agents.request(s.owner_username, {
       op: 'claude.send', launch: launch(s), uuid, guest,
       ...(s.harness === 't3code' && t3Autopilot ? { t3Autopilot: true } : {}),
@@ -1359,12 +1372,17 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
       const page = await agents.request<{ messages: { uuid?: string }[]; more?: boolean }>(s.owner_username, {
         op: 'claude.history', launch: launch(s), before, turns: HISTORY_TURNS,
       }, 120_000)
-      const turns = new Map(repo.turns(id).map((t) => [t.after_uuid, t]))
+      const turns = new Map<string, TurnRow[]>()
+      for (const t of repo.turns(id)) {
+        if (!t.after_uuid) continue
+        const list = turns.get(t.after_uuid) ?? []
+        list.push(t)
+        turns.set(t.after_uuid, list)
+      }
       const messages: unknown[] = []
       for (const m of page.messages) {
         messages.push(lighter(m))
-        const t = m.uuid ? turns.get(m.uuid) : undefined
-        if (t) messages.push(turnResult(t))
+        for (const t of (m.uuid ? turns.get(m.uuid) : undefined) ?? []) messages.push(turnResult(t))
       }
       // In a team role's session, the account the team runs on wrote the shift prompts and continuations; show the role.
       const rl = roleLabel(s)

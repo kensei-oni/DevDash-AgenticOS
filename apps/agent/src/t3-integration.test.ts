@@ -20,7 +20,8 @@ const config = join(home, 't3code.json')
 Object.assign(process.env, { HOME: home, DEVDASH_T3_CONFIG: config })
 type Item = { itemId: string; messageId?: string; position: number; runId: string; type: string; createdBy: string; text: string; title: string | null; status: string }
 type ModelSelection = { instanceId: string; model: string; options?: { id: string; value: string | boolean }[] }
-type Thread = { options?: ModelSelection['options']; threadId: string; projectId: string; model: string; providerInstanceId: string; status: string; title: string; runtimeMode: string; interactionMode: string; items: Item[]; runId?: string; reads: number; behavior: string; runs: { runId: string; status: string }[] }
+type PendingEntry = { requestId: string; questions: { id: string; header: string; question: string; multiSelect?: boolean; options?: { label: string; value?: string; description?: string }[] }[]; answers?: Record<string, unknown> }
+type Thread = { options?: ModelSelection['options']; threadId: string; projectId: string; model: string; providerInstanceId: string; status: string; title: string; runtimeMode: string; interactionMode: string; items: Item[]; runId?: string; reads: number; behavior: string; runs: { runId: string; status: string }[]; pendingQuestions?: PendingEntry[] }
 const threads = new Map<string, Thread>()
 const calls: { name: string; args: Record<string, unknown> }[] = []
 const selectionWrites = () => calls.filter((c) => c.name === 't3_thread_configure' && c.args.modelSelection !== undefined)
@@ -115,7 +116,18 @@ const http = createServer(async (req, res) => {
     if (raced) externalRun(t)
     const runId = randomUUID()
     t.runId = runId; t.status = 'running'; t.reads = 0
-    t.behavior = prompt.endsWith('stream') ? 'stream' : prompt.endsWith('cancel') ? 'cancel' : prompt.endsWith('long-text') ? 'long' : prompt.endsWith('long-stall') ? 'longstall' : prompt.endsWith('waiting') ? 'waiting' : prompt.endsWith('fail-poll') ? 'pollfail' : prompt.endsWith('transient-wait') ? 'transient' : 'quick'
+    t.behavior = prompt.endsWith('stream') ? 'stream' : prompt.endsWith('cancel') ? 'cancel' : prompt.endsWith('long-text') ? 'long' : prompt.endsWith('long-stall') ? 'longstall' : prompt.endsWith('waiting') ? 'waiting' : prompt.endsWith('fail-poll') ? 'pollfail' : prompt.endsWith('transient-wait') ? 'transient' : prompt.endsWith('ask-question') ? 'askquestion' : prompt.endsWith('fail-run-error') ? 'failrun' : 'quick'
+    if (t.behavior === 'askquestion') {
+      t.pendingQuestions = [{
+        requestId: `req-${runId}`,
+        questions: [
+          { id: 'q0', header: 'Mode', question: 'Which mode should we use?', options: [{ label: 'Fast mode', value: 'fast', description: 'Quick' }, { label: 'Thorough mode', value: 'thorough', description: 'Deep' }] },
+          { id: 'q1', header: 'Checks', question: 'Which checks should run?', multiSelect: true, options: [{ label: 'Lint, format', value: 'lint_fmt', description: 'Style' }, { label: 'Unit tests', value: 'unit', description: 'Tests' }] },
+        ],
+      }]
+    } else {
+      t.pendingQuestions = undefined
+    }
     t.runs.unshift({ runId, status: 'running' })
     const pos = t.items.length
     t.items.push({ itemId: `user-${runId}`, messageId: `message:mcp:client:test:thread-send:${String(args.clientRequestId)}`, position: pos, runId, type: 'user_message', createdBy: 'agent', text: prompt, title: null, status: 'completed' })
@@ -143,6 +155,17 @@ const http = createServer(async (req, res) => {
       item.text = t.behavior === 'stream' ? (t.reads < 3 ? 'Hel' : 'Hello') : t.behavior === 'cancel' ? 'Working' : ['long', 'longstall'].includes(t.behavior) ? 'L'.repeat(60010) : t.behavior === 'waiting' ? (t.reads < 3 ? '' : 'Approved') : 'Done'
       if (t.behavior === 'transient') { current.status = t.reads < 2 ? 'running' : 'completed'; t.status = t.reads < 2 ? 'waiting' : 'completed'; item.text = 'Final reply'; if (current.status === 'completed') item.status = 'completed' }
       if (t.behavior === 'waiting') { current.status = t.reads < 3 ? 'waiting' : 'running'; t.status = current.status }
+      if (t.behavior === 'askquestion') {
+        const answered = t.pendingQuestions?.[0]?.answers
+        item.text = answered ? `Answered: ${JSON.stringify(answered)}` : ''
+        if (answered) { current.status = 'completed'; t.status = 'completed'; item.status = 'completed' }
+      }
+      if (t.behavior === 'failrun') {
+        item.text = ''
+        item.status = 'failed'
+        t.items.push({ itemId: `error-${current.runId}`, position: t.items.length, runId: current.runId, type: 'error', createdBy: 'agent', title: null, text: 'Upstream Carbon rate limit hit', status: 'failed' })
+        current.status = 'failed'; t.status = 'failed'
+      }
       if (['quick', 'long'].includes(t.behavior) || (t.behavior === 'stream' && t.reads >= 3) || (t.behavior === 'waiting' && t.reads >= 4)) {
         current.status = 'completed'; t.status = 'completed'; item.status = 'completed'
         if (t.behavior === 'stream') t.items.push({ itemId: `tool-${current.runId}`, position: t.items.length, runId: current.runId, type: 'command_execution', createdBy: 'agent', title: 'echo checked', text: 'checked', status: 'completed' })
@@ -152,7 +175,23 @@ const http = createServer(async (req, res) => {
     const offset = Number(args.textOffset ?? 0)
     const page = available.slice(0, Number(args.limit ?? 100))
     const items = page.map((i) => ({ ...i, updatedAt: `revision:${i.text.length}:${i.status}`, text: i.text.slice(offset, offset + 50000), textTruncated: i.text.length > offset + 50000, nextTextOffset: i.text.length > offset + 50000 ? offset + 50000 : null }))
-    data = { thread: { ...t, items: undefined, runs: undefined, activeRunId: t.runs.find((r) => !['completed', 'failed', 'interrupted', 'cancelled', 'rolled_back'].includes(r.status))?.runId ?? null, latestRunId: t.runs[0]?.runId ?? null, pendingRequestCount: t.behavior === 'waiting' && t.status === 'waiting' ? 1 : 0, link: 'https://t3.example/thread' }, items, recentRuns: t.runs, hasMore: available.length > page.length, nextPosition: items.at(-1)?.position ?? null }
+    const unansweredCount = (t.pendingQuestions ?? []).filter((q) => !q.answers).length
+    data = { thread: { ...t, items: undefined, runs: undefined, pendingQuestions: undefined, activeRunId: t.runs.find((r) => !['completed', 'failed', 'interrupted', 'cancelled', 'rolled_back'].includes(r.status))?.runId ?? null, latestRunId: t.runs[0]?.runId ?? null, pendingRequestCount: t.behavior === 'waiting' && t.status === 'waiting' ? 1 : unansweredCount, link: 'https://t3.example/thread' }, items, recentRuns: t.runs, hasMore: available.length > page.length, nextPosition: items.at(-1)?.position ?? null }
+  } else if (name === 't3_pending_request') {
+    assert.ok(t)
+    await hold(name, t.threadId)
+    if (args.action === 'list') {
+      data = { threadId: t.threadId, requestIds: (t.pendingQuestions ?? []).filter((q) => !q.answers).map((q) => q.requestId) }
+    } else if (args.action === 'read') {
+      const entry = (t.pendingQuestions ?? []).find((q) => q.requestId === args.requestId)
+      assert.ok(entry)
+      data = { threadId: t.threadId, requestId: entry.requestId, questions: entry.questions }
+    } else if (args.action === 'respond') {
+      const entry = (t.pendingQuestions ?? []).find((q) => q.requestId === args.requestId)
+      assert.ok(entry)
+      entry.answers = args.answers as Record<string, unknown>
+      data = { threadId: t.threadId, requestId: entry.requestId, status: 'responded' }
+    } else throw new Error(`Unexpected t3_pending_request action: ${String(args.action)}`)
   } else throw new Error(`Unexpected fake MCP tool: ${name}`)
   reply({ structuredContent: data })
 }).listen(0, '127.0.0.1')
@@ -1155,4 +1194,55 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     H.refreshT3()
     rmSync(folder, { recursive: true, force: true })
   }
+})
+
+
+test('T3 bridges ask_question via t3_pending_request into AskUserQuestion even while thread.status stays running', async () => {
+  const l = launch()
+  const start = events.length
+  await H.send(l, [{ type: 'text', text: 'ask-question' }], randomUUID())
+  const askEv = await eventAfter(start, (e) => e.id === l.id && e.ev === 'claude.permission' && e.toolName === 'AskUserQuestion')
+  assert.equal(H.pendingFor(l.id).length, 1)
+  const native = events.find((e) => e.id === l.id && e.ev === 'claude.native')!.nativeId as string
+  assert.equal(threads.get(native)!.status, 'running', 'Antigravity keeps thread.status running during ask_question')
+  H.answer(l.id, String(askEv.requestId), {
+    behavior: 'allow',
+    updatedInput: {
+      answers: {
+        'Which mode should we use?': 'Thorough mode',
+        'Which checks should run?': 'Lint, format, Custom check',
+      },
+    },
+  }, { owner: true })
+  const done = (await eventAfter(start, isResult(l.id))).msg as Record<string, unknown>
+  assert.equal(done.is_error, false)
+  assert.equal(done.result, 'Answered: {"q0":"thorough","q1":["lint_fmt","Custom check"]}')
+  await H.stop(l.id)
+})
+
+test('T3 recovers an orphaned DevDash-started run on resume without stopping external runs', async () => {
+  const l = launch()
+  await turn(l, 'quick')
+  const native = events.find((e) => e.id === l.id && e.ev === 'claude.native')!.nativeId as string
+  await H.stop(l.id)
+  const t = threads.get(native)!
+  const orphanRunId = randomUUID()
+  t.runId = orphanRunId; t.status = 'running'; t.behavior = 'orphan'; t.reads = 0
+  t.runs.unshift({ runId: orphanRunId, status: 'running' })
+  t.items.push({ itemId: `user-${orphanRunId}`, messageId: `message:mcp:client:test:thread-send:devdash-${randomUUID()}`, position: t.items.length, runId: orphanRunId, type: 'user_message', createdBy: 'agent', text: 'Stuck previous DevDash turn', title: null, status: 'completed' })
+  t.items.push({ itemId: `assistant-${orphanRunId}`, position: t.items.length, runId: orphanRunId, type: 'assistant_message', createdBy: 'agent', text: '', title: null, status: 'running' })
+  const resumed = { ...l, started: true, nativeId: native }
+  const result = await turn(resumed, 'quick')
+  assert.equal(result.is_error, false)
+  assert.equal(result.result, 'Done')
+  assert.equal(t.runs.find((r) => r.runId === orphanRunId)?.status, 'interrupted')
+  await H.stop(l.id)
+})
+
+test('T3 surfaces provider error item details when a run fails', async () => {
+  const l = launch()
+  const result = await turn(l, 'fail-run-error')
+  assert.equal(result.is_error, true)
+  assert.match(String(result.result), /Upstream Carbon rate limit hit/)
+  await H.stop(l.id)
 })

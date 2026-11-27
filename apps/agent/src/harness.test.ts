@@ -124,3 +124,18 @@ test("a prompt naming a command is kept as one; anything else, or a teammate's, 
   assert.deepEqual(notACommand([{ type: 'text', text: '/review' }]), [{ type: 'text', text: 'A teammate wrote:' }, { type: 'text', text: '/review' }])
   assert.deepEqual(notACommand([{ type: 'text', text: 'hi' }]), [{ type: 'text', text: 'hi' }])
 })
+
+test("formAnswer handles multi-select option labels containing commas and custom answers", () => {
+  const schema = {
+    properties: {
+      q0: { type: 'array', title: 'Setup', description: 'Steps?', items: { anyOf: [
+        { const: 'create_repo', title: 'Create repo, initialize git' },
+        { const: 'ci', title: 'Add CI, lint and tests' },
+      ] } },
+      q0_custom: { type: 'string' },
+    },
+  }
+  const qs = formQuestions(schema)
+  assert.deepEqual(formAnswer(qs, { 'Steps?': 'Create repo, initialize git, Add CI, lint and tests' }, schema), { q0: ['create_repo', 'ci'] })
+  assert.deepEqual(formAnswer(qs, { 'Steps?': 'Use existing monorepo' }, schema), { q0: [], q0_custom: 'Use existing monorepo' })
+})

@@ -8,10 +8,23 @@ import { connectedCapabilities, nativeVariants, effortOption, selection, modelId
 import { disposeSupervisorWorkers } from './t3-supervisor.ts'
 
 type Selection = { model: string; instanceId: string; options?: { id: string; value: string | boolean }[] }
-type Item = { itemId: string; position: number; runId: string | null; type: string; createdBy: string | null; text: string | null; title: string | null; status: string; textTruncated?: boolean; nextTextOffset?: number | null; [key: string]: unknown }
+type Item = { itemId: string; messageId?: string | null; position: number; runId: string | null; type: string; createdBy: string | null; text: string | null; title: string | null; status: string; textTruncated?: boolean; nextTextOffset?: number | null; [key: string]: unknown }
 type Read = { thread: { threadId: string; projectId: string; worktreePath?: string | null; model: string; providerInstanceId: string; status: string; title: string; activeRunId?: string | null; latestRunId?: string | null; pendingRequestCount?: number; runtimeMode: string; interactionMode: string; link?: string | null }; items: Item[]; hasMore: boolean; nextPosition: number | null; recentRuns: { runId: string; status: string; [key: string]: unknown }[] }
+type PendingQuestion = { id: string; header?: string; question: string; options?: { label: string; description?: string; value?: string }[]; multiSelect?: boolean; allowCustomAnswer?: boolean }
 const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'rolled_back'])
 const send = (m: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...m })}\n`)
+let nextHostId = 0
+const hostCalls = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
+function requestHost<T>(method: string, params: Record<string, unknown>): Promise<T> {
+  if (closing) return Promise.reject(new Error('T3 Code bridge is closing.'))
+  const id = `t3-${++nextHostId}`
+  return new Promise<T>((resolve, reject) => {
+    hostCalls.set(id, { resolve: resolve as (v: unknown) => void, reject })
+    send({ id, method, params })
+  })
+}
+const devdashRuns = new Set<string>()
+const answeredRequests = new Set<string>()
 const client = new T3Client()
 let caps: Capabilities
 let thread: Read['thread'] | undefined
@@ -168,20 +181,83 @@ async function setSelection(model: string | null, requestedEffort: string | null
   thread = { ...thread!, providerInstanceId: picked.instanceId, model: picked.model }
   return { configOptions: configOptions() }
 }
-function requestMatches(item: Item, requestId: string) {
+function decodedIds(item: Item): string[] {
+  const out: string[] = []
   for (const value of [item.messageId, item.itemId]) {
     if (typeof value !== 'string') continue
     let decoded = value
+    out.push(decoded)
     for (let i = 0; i < 3; i++) {
-      if (decoded.endsWith(`:thread-send:${requestId}`)) return true
-      try { const next = decodeURIComponent(decoded); if (next === decoded) break; decoded = next } catch { break }
+      try { const next = decodeURIComponent(decoded); if (next === decoded) break; decoded = next; out.push(decoded) } catch { break }
     }
   }
-  return false
+  return out
+}
+function requestMatches(item: Item, requestId: string) {
+  return decodedIds(item).some((d) => d.endsWith(`:thread-send:${requestId}`) || d.endsWith(`:thread-send:devdash-${requestId}`))
+}
+function trackDevDashRuns(items: Item[]) {
+  for (const item of items) {
+    if (!item.runId || item.type !== 'user_message') continue
+    if (decodedIds(item).some((d) => /:thread-send:devdash-[a-f0-9-]{36}$/.test(d))) {
+      devdashRuns.add(item.runId)
+      continue
+    }
+    const text = item.text ?? ''
+    for (const tag of ['DevDash rules', 'DevDash workflow']) {
+      const m = new RegExp(`^\\[${tag} ([a-f0-9-]{36})\\]\\n`).exec(text)
+      if (m && requestMatches(item, m[1]!)) { devdashRuns.add(item.runId); break }
+    }
+  }
 }
 async function stopOwned(runId: string) {
   await client.call('t3_thread_interrupt', { threadId: thread!.threadId, runId, clientRequestId: randomUUID() })
   if (running === runId) running = undefined
+}
+async function listPendingQuestions(): Promise<string[] | null> {
+  try {
+    const res = await client.call<{ requestIds?: unknown }>('t3_pending_request', { action: 'list', threadId: thread!.threadId })
+    return Array.isArray(res?.requestIds) ? res.requestIds.filter((x): x is string => typeof x === 'string') : []
+  } catch { return null }
+}
+async function askHostQuestion(requestId: string, questions: PendingQuestion[]) {
+  const properties: Record<string, unknown> = {}
+  for (const q of questions) {
+    const choices = (q.options ?? []).map((o) => ({
+      const: o.value ?? o.label,
+      title: o.label,
+      ...(o.description && o.description !== o.label ? { description: o.description } : {}),
+    }))
+    if (q.multiSelect) {
+      properties[q.id] = { type: 'array', ...(q.header ? { title: q.header } : {}), description: q.question, items: { anyOf: choices } }
+    } else if (choices.length) {
+      properties[q.id] = { type: 'string', ...(q.header ? { title: q.header } : {}), description: q.question, oneOf: choices }
+    } else {
+      properties[q.id] = { type: 'string', ...(q.header ? { title: q.header } : {}), description: q.question }
+    }
+    if (q.allowCustomAnswer !== false && choices.length) properties[`${q.id}_custom`] = { type: 'string' }
+  }
+  const ask = requestHost<{ action?: string; content?: Record<string, unknown> }>('elicitation/create', {
+    mode: 'form',
+    message: questions[0]?.question ?? 'A question from T3 Code',
+    requestedSchema: { type: 'object', properties },
+  }).then((reply) => ({ kind: 'host' as const, reply }))
+  let watchDone = false
+  const watchExternal = (async () => {
+    while (!watchDone && !stopped && !closing) {
+      await delay(1000)
+      if (watchDone || stopped || closing) break
+      const active = await listPendingQuestions()
+      if (active !== null && !active.includes(requestId)) return { kind: 'external' as const }
+    }
+    return { kind: 'aborted' as const }
+  })()
+  try {
+    return await Promise.race([ask, watchExternal])
+  } finally {
+    watchDone = true
+    void ask.catch(() => {})
+  }
 }
 const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
   initialize: async () => {
@@ -240,6 +316,7 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
     const opt = effortOption(await findModel(current))
     const savedLevel = current.options?.find((o) => o.id === opt?.id)?.value
     effort = typeof savedLevel === 'string' ? savedLevel : 'default'
+    trackDevDashRuns(data.items)
     await transcribe(data.items, true)
     return { configOptions: configOptions() }
   },
@@ -253,23 +330,47 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
     throw new Error('Unknown T3 Code option.')
   },
   'session/prompt': async (p) => {
-    if (running || unresolvedSend || activePrompt) throw new Error('T3 Code may still be running. Stop the conversation before sending again.')
+    if (unresolvedSend || activePrompt) throw new Error('T3 Code may still be running. Stop the conversation before sending again.')
     const prompt = p.prompt as { type: string; text?: string }[]
     if (!Array.isArray(prompt) || prompt.some((b) => b.type !== 'text')) throw new Error('This T3 Code bridge currently accepts text messages only.')
     stopped = false
     activePrompt = true
     deadlineAt = Date.now() + turnLimitMs
     try {
-      // Read only activity added since this bridge last saw the thread. Never queue behind a turn from T3's own UI.
-      const before = await allItems(lastPosition)
+      if (running) {
+        try {
+          const check = await readThread(lastPosition < 0 ? {} : { afterPosition: lastPosition })
+          trackDevDashRuns(check.items)
+          if (activeRun(check) === running) await stopOwned(running)
+          else running = undefined
+        } catch {
+          throw new Error('T3 Code may still be running. Stop the conversation before sending again.')
+        }
+      }
+      // Read only activity added since this bridge last saw the thread. Never queue behind an external turn from T3's own UI.
+      let before = await allItems(lastPosition)
+      trackDevDashRuns(before.items)
       thread = before.thread
-      if (busyThread(before)) throw new Error('This conversation is already running in T3 Code. Wait for it to finish or stop it there before sending another message.')
+      if (busyThread(before)) {
+        const orphan = activeRun(before)
+        if (orphan && devdashRuns.has(orphan)) {
+          await stopOwned(orphan)
+          const settleUntil = Date.now() + 5000
+          while (!stopped && !closing && busyThread(before) && Date.now() < settleUntil) {
+            await delay(150)
+            before = await allItems(lastPosition)
+            trackDevDashRuns(before.items)
+            thread = before.thread
+          }
+        }
+        if (busyThread(before)) throw new Error('This conversation is already running in T3 Code. Wait for it to finish or stop it there before sending another message.')
+      }
       if (stopped || closing) return { stopReason: 'cancelled' }
       const afterPosition = lastPosition
       const requestId = randomUUID()
       const text = prompt.map((b) => b.text ?? '').join('\n')
       const blocks: string[] = []
-      if (typeof p.rulesContext === 'string' && p.rulesContext.trim() && before.items.length === 0) {
+      if (typeof p.rulesContext === 'string' && p.rulesContext.trim() && lastPosition < 0 && before.items.length === 0) {
         blocks.push(`[DevDash rules ${requestId}]\n${p.rulesContext.trim()}\n[/DevDash rules ${requestId}]`)
       }
       if (typeof p.workflowContext === 'string' && p.workflowContext.trim()) {
@@ -280,15 +381,17 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
       unresolvedSend = true
       let result: { runId: string; delivery?: string }
       try {
-        result = await client.call<{ runId: string; delivery?: string }>('t3_thread_send', { threadId: thread!.threadId, message, mode: 'queue', clientRequestId: requestId })
+        result = await client.call<{ runId: string; delivery?: string }>('t3_thread_send', { threadId: thread!.threadId, message, mode: 'queue', clientRequestId: `devdash-${requestId}` })
         unresolvedSend = false
       } catch (err) {
         // A rejection or lost reply does not authorize stopping somebody else's turn. Reconcile only our exact
         // request id, exposed in T3's public message identity. Unknown formats fail closed, without a blind interrupt.
         try {
           const data = await allItems(afterPosition)
+          trackDevDashRuns(data.items)
           const own = data.items.find((i) => i.type === 'user_message' && i.runId && !baselineRuns.has(i.runId) && requestMatches(i, requestId))
           if (own?.runId) {
+            devdashRuns.add(own.runId)
             running = own.runId
             await stopOwned(own.runId)
             unresolvedSend = false
@@ -302,14 +405,16 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
         throw err
       }
       const runId = result.runId
+      devdashRuns.add(runId)
       running = runId
-      const deadline = deadlineAt
+      let deadline = deadlineAt
       let waiting = false
       let waits = 0
       let settled = false
       let cursor = afterPosition
       let interval = 120
       let previous = ''
+      let lastRunError = ''
       try {
         if (result.delivery === 'queued') {
           await stopOwned(runId)
@@ -318,14 +423,28 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
         }
         if (stopped || closing) await stopOwned(runId)
         while (!closing) {
-          const data = await allItems(cursor)
+          let data: Awaited<ReturnType<typeof allItems>>
+          try {
+            data = await allItems(cursor)
+          } catch (err) {
+            if (!stopped && !closing && err instanceof T3RequestError && err.mayHaveExecuted && Date.now() + 200 < deadline) {
+              await delay(150)
+              data = await allItems(cursor)
+            } else throw err
+          }
+          trackDevDashRuns(data.items)
           const items = data.items.filter((i) => i.runId === runId)
+          for (const i of items) {
+            if (i.type === 'error' && typeof i.text === 'string' && i.text.trim()) lastRunError = i.text.trim()
+          }
           await transcribe(items)
           thread = data.thread
           const run = data.recentRuns.find((r) => r.runId === runId)
           if (run && terminal.has(run.status)) {
             settled = true
-            if (run.status === 'failed' || run.status === 'rolled_back') throw new Error('T3 Code could not complete this turn. Open the conversation in T3 Code for details.')
+            if (run.status === 'failed' || run.status === 'rolled_back') {
+              throw new Error(lastRunError ? `T3 Code could not complete this turn: ${lastRunError.slice(0, 400)}` : 'T3 Code could not complete this turn. Open the conversation in T3 Code for details.')
+            }
             return { stopReason: stopped || run.status !== 'completed' ? 'cancelled' : 'end_turn' }
           }
           if (Date.now() >= deadline) {
@@ -333,7 +452,58 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
             settled = true
             throw new Error('T3 Code reached the turn time limit and the DevDash-started run was stopped.')
           }
-          const pending = thread.status === 'waiting' && (thread.pendingRequestCount ?? 0) > 0
+          let bridgedQuestion = false
+          if ((thread.pendingRequestCount ?? 0) > 0 && !stopped && !closing) {
+            const listed = await listPendingQuestions()
+            const pendingIds = (listed ?? []).filter((id) => !answeredRequests.has(id))
+            if (pendingIds.length > 0) {
+              bridgedQuestion = true
+              for (const reqId of pendingIds) {
+                if (stopped || closing) break
+                const detail = await client.call<{ requestId: string; questions?: PendingQuestion[] }>('t3_pending_request', {
+                  action: 'read', threadId: thread.threadId, requestId: reqId,
+                })
+                const questions = Array.isArray(detail.questions) ? detail.questions : []
+                if (!questions.length) { answeredRequests.add(reqId); continue }
+                const pausedAt = Date.now()
+                deadlineAt = 0
+                let outcome: Awaited<ReturnType<typeof askHostQuestion>>
+                try {
+                  outcome = await askHostQuestion(reqId, questions)
+                } finally {
+                  deadline += Date.now() - pausedAt
+                  deadlineAt = deadline
+                }
+                if (outcome.kind === 'external') { answeredRequests.add(reqId); continue }
+                if (stopped || closing || outcome.kind !== 'host' || outcome.reply.action !== 'accept' || !outcome.reply.content) {
+                  if (running) await stopOwned(runId)
+                  settled = true
+                  return { stopReason: 'cancelled' }
+                }
+                const answers: Record<string, unknown> = {}
+                for (const q of questions) {
+                  const rawCustom = outcome.reply.content[`${q.id}_custom`]
+                  const custom = typeof rawCustom === 'string' ? rawCustom.trim() : ''
+                  const chosen = outcome.reply.content[q.id]
+                  if (q.multiSelect) {
+                    const arr = Array.isArray(chosen) ? chosen.filter((x): x is string => typeof x === 'string') : []
+                    if (custom) arr.push(custom)
+                    answers[q.id] = arr
+                  } else if (custom) {
+                    answers[q.id] = custom
+                  } else if (chosen !== undefined) {
+                    answers[q.id] = chosen
+                  }
+                }
+                await client.call('t3_pending_request', { action: 'respond', threadId: thread.threadId, requestId: reqId, answers })
+                answeredRequests.add(reqId)
+              }
+              interval = 120
+              previous = ''
+              continue
+            }
+          }
+          const pending = !bridgedQuestion && thread.status === 'waiting' && (thread.pendingRequestCount ?? 0) > 0
           if (pending !== waiting) {
             waiting = pending
             update({ sessionUpdate: 'session_info_update', _meta: { 'devdash/t3-status': { status: pending ? 'waiting' : 'working' } } })
@@ -367,15 +537,33 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
     stopped = true
     // When a send is still unresolved, its response/reconciliation will identify our run before cancelling it.
     if (running) await stopOwned(running)
+    else if (!unresolvedSend && !activePrompt && thread) {
+      try {
+        const data = await readThread(lastPosition < 0 ? {} : { afterPosition: lastPosition })
+        trackDevDashRuns(data.items)
+        const orphan = activeRun(data)
+        if (orphan && devdashRuns.has(orphan)) await stopOwned(orphan)
+      } catch { /* best-effort orphan interrupt */ }
+    }
     pollWake?.abort()
   },
 }
 const input = createInterface({ input: process.stdin })
 input.on('line', (line) => {
   void (async () => {
-    let m: { id?: string | number; method?: string; params?: Record<string, unknown> }
+    let m: { id?: string | number; method?: string; params?: Record<string, unknown>; result?: unknown; error?: { code?: number; message?: string } }
     try { m = JSON.parse(line) } catch { return }
-    if (!m.method) return
+    if (!m.method) {
+      if (m.id !== undefined) {
+        const call = hostCalls.get(String(m.id))
+        if (call) {
+          hostCalls.delete(String(m.id))
+          if (m.error) call.reject(new Error(m.error.message ?? 'Host request failed.'))
+          else call.resolve(m.result)
+        }
+      }
+      return
+    }
     try {
       if (!handlers[m.method]) throw new Error(`Unsupported T3 Code operation: ${m.method}`)
       const pending = Promise.resolve(handlers[m.method]!(m.params ?? {}))
@@ -391,6 +579,8 @@ input.on('line', (line) => {
 async function close() {
   if (closing) return
   closing = true
+  for (const call of hostCalls.values()) call.reject(new Error('T3 Code bridge closed.'))
+  hostCalls.clear()
   try {
     await handlers['session/cancel']!({})
     await promptDone?.catch(() => {})

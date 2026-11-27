@@ -385,7 +385,7 @@ test('sumTurns: session total is the last answer’s cumulative cost, with token
   const turn = (over: Partial<TurnRow>): TurnRow => ({
     session_id: 's1', result_uuid: 'r', after_uuid: null, prompt_uuid: null, ok: 1, duration_ms: 0,
     cost_usd: 0, turn_cost_usd: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
-    num_turns: 1, model: null, created_at: 0, ...over,
+    num_turns: 1, model: null, error: null, created_at: 0, ...over,
   })
   assert.deepEqual(sumTurns([]), { cost: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, turns: 0 })
   const total = sumTurns([
@@ -866,4 +866,43 @@ test('voice mode in a session: wherever they may send, never where they only wat
   assert.deepEqual(claude.voiceAccess(ann, 's3'), { assistant: true })
   assert.throws(() => claude.voiceAccess(bob, 's3'), /only watch|not_found|does not exist/)
   void cat
+})
+
+test("fast-failing turns keep their error text and attach to each prompt on reload", async () => {
+  let u1 = '', u2 = ''
+  const db = openDb(':memory:')
+  db.prepare("insert into users (id, email, username, name, password_hash, totp_secret, role) values (1, 'a@x.io', 'ann', 'Ann', 'x', 'x', 'member')").run()
+  db.prepare("insert into claude_sessions (id, owner_id, harness, title, cwd, shared, started, drive, permission_mode) values ('s1', 1, 't3code', 'Hamasa', '/home/ann', 0, 1, 0, 'bypassPermissions')").run()
+  let onEvent: ((username: string, ev: Record<string, unknown>) => void) | undefined
+  const agents = {
+    onEvent: (fn: (username: string, ev: Record<string, unknown>) => void) => { onEvent = fn },
+    request: async (_u: string, req: Record<string, unknown>) => {
+      if (req.op === 'claude.send') {
+        const uuid = String(req.uuid)
+        if (!u1) {
+          u1 = uuid
+          // Turn 1 fails inside claude.send before sendTo returns, with zero assistant messages.
+          onEvent?.('ann', { ev: 'claude.msg', id: 's1', msg: { type: 'result', uuid: 'res-1', subtype: 'error_during_execution', is_error: true, result: 'Lost contact with the DevDash-started T3 Code run.', duration_ms: 90608 } })
+        } else {
+          u2 = uuid
+          onEvent?.('ann', { ev: 'claude.msg', id: 's1', msg: { type: 'result', uuid: 'res-2', subtype: 'error_during_execution', is_error: true, result: 'T3 Code may still be running.', duration_ms: 5 } })
+        }
+        return { ok: true }
+      }
+      if (req.op === 'claude.history') {
+        return { messages: [{ type: 'user', uuid: u1, message: { role: 'user', content: 'first' } }, { type: 'user', uuid: u2, message: { role: 'user', content: 'second' } }], more: false }
+      }
+      return { ok: true }
+    },
+  } as unknown as AgentsService
+  const claude = claudeService({ db, agents, hub: createHub(), projects: { idOf: () => 0 } as unknown as ProjectsService, notify: async () => {} })
+  const ann: User = { id: 1, name: 'Ann', username: 'ann', email: '', role: 'member' }
+  await claude.send(ann, 's1', 'first', [])
+  await claude.send(ann, 's1', 'second', [])
+  const hist = await claude.history(ann, 's1')
+  const results = (hist.messages as { type?: string; uuid?: string; result?: string }[]).filter((m) => m.type === 'result')
+  assert.deepEqual(results.map((r) => [r.uuid, r.result]), [
+    ['res-1', 'Lost contact with the DevDash-started T3 Code run.'],
+    ['res-2', 'T3 Code may still be running.'],
+  ])
 })

@@ -4,7 +4,7 @@
 // c-<id> session Claude's CLI uses. Today that is OpenCode (opencode.ts); another ACP agent is another entry in AGENTS.
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { notFound, PROTOCOL_VERSION, Rpc, Transcriber, type ToolCall, type Usage } from './acp.ts'
@@ -220,18 +220,39 @@ export function formQuestions(schema: Form, message?: string) {
     }
   })
 }
+function matchMultiLabels(said: string, options: { label: string; value: string }[]): { picked: string[]; rest: string } {
+  if (!said || !options.length) return { picked: [], rest: said }
+  const sorted = [...options].filter((o) => o.label.length > 0).sort((a, b) => b.label.length - a.label.length)
+  const picked: string[] = []
+  let rest = said
+  while (rest.length > 0) {
+    const hit = sorted.find((o) => rest === o.label || rest.startsWith(`${o.label}, `))
+    if (!hit) break
+    picked.push(hit.value)
+    rest = rest === hit.label ? '' : rest.slice(hit.label.length + 2)
+  }
+  return { picked, rest }
+}
 export function formAnswer(qs: ReturnType<typeof formQuestions>, answers: Record<string, string>, schema: Form) {
   const content: Record<string, unknown> = {}
   for (const q of qs) {
     const said = (answers[q.question] ?? '').trim()
     const byLabel = new Map(q.options.map((o) => [o.label, o.value]))
-    const parts = q.multiSelect ? said.split(', ') : [said]
-    const picked = parts.map((p) => byLabel.get(p)).filter((v): v is string => !!v)
-    const typed = picked.length === parts.length ? '' : said
+    let picked: string[]
+    let typed = ''
+    if (q.multiSelect) {
+      const matched = matchMultiLabels(said, q.options)
+      picked = matched.picked
+      typed = matched.rest
+    } else {
+      const one = byLabel.get(said)
+      picked = one ? [one] : []
+      if (!one) typed = said
+    }
     if (q.multiSelect) content[q.key] = picked
     else if (picked[0]) content[q.key] = picked[0]
     if (typed && schema.properties?.[`${q.key}_custom`]) content[`${q.key}_custom`] = typed
-    else if (typed && !q.options.length) content[q.key] = typed
+    else if (typed && !q.options.length) content[q.key] = q.multiSelect ? [typed] : typed
   }
   return content
 }
@@ -249,6 +270,10 @@ async function startChat(l: Launch, configureSelection = false): Promise<Chat> {
   // DevDash's rules for the session, read by the agent as instructions; rewritten at every start (they change with sharing).
   const dir = join(homedir(), '.cache', 'devdash', 'sessions', l.id)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
+  for (const f of readdirSync(dir)) {
+    if (!f.startsWith('tools-')) continue
+    try { if (Date.now() - statSync(join(dir, f)).mtimeMs > 60 * 60_000) rmSync(join(dir, f), { force: true }) } catch {}
+  }
   const rulesFile = join(dir, 'devdash-rules.md')
   if (l.harness !== 't3code') writeFileSync(rulesFile, systemAppend(l), { mode: 0o600 })
   const mcp: Parameters<Agent['sessionEnv']>[0]['mcp'] = {
@@ -622,15 +647,24 @@ async function runTurns(c: Chat) {
           ...(rulesContext ? { rulesContext } : {}),
           ...(workflowContext ? { workflowContext } : {}),
         })
+        const wasFresh = c.fresh
         c.fresh = false
         for (const t of c.children.values()) t.flush()
-        c.t.end({ stopReason: r.stopReason, durationMs: Date.now() - started, costUsd: c.cost, usage: r.usage, fresh: c.fresh })
+        c.t.end({ stopReason: r.stopReason, durationMs: Date.now() - started, costUsd: c.cost, usage: r.usage, fresh: wasFresh, promptUuid: next.uuid })
       } catch (err) {
-        if (c.stopping) return void c.t.end({ stopReason: 'cancelled', durationMs: Date.now() - started, costUsd: c.cost, fresh: c.fresh })
+        if (c.stopping) return void c.t.end({ stopReason: 'cancelled', durationMs: Date.now() - started, costUsd: c.cost, fresh: c.fresh, promptUuid: next.uuid })
         const msg = (err as Error).message
         const auth = /auth/i.test(msg) ? ` Connect the model's provider on the Agent setup page.` : ''
-        c.t.end({ stopReason: 'error', durationMs: Date.now() - started, costUsd: c.cost, error: `${msg}${auth}`.slice(0, 500), fresh: c.fresh })
-      } finally { if (helper) rmSync(helper.path, { force: true }) }
+        c.t.end({ stopReason: 'error', durationMs: Date.now() - started, costUsd: c.cost, error: `${msg}${auth}`.slice(0, 500), fresh: c.fresh, promptUuid: next.uuid })
+      } finally {
+        // Leave the wrapper in place only if the bridge died unexpectedly mid-turn while the remote provider may still invoke it.
+        if (helper && !c.rpc.closed) rmSync(helper.path, { force: true })
+        for (const p of c.pending.values()) {
+          emit({ ev: 'claude.permission_done', id: c.launch.id, requestId: p.requestId })
+          p.resolve({ behavior: 'deny', message: 'Turn ended' })
+        }
+        c.pending.clear()
+      }
       c.children.clear()
     }
   } finally {
