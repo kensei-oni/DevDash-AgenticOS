@@ -256,7 +256,7 @@ export function autopilotService({ db, hub, claude, notify, team = () => undefin
   /** Who is sending right now on the supervisor's behalf: its own messages don't resolve "Needs you". */
   const supervising = new Set<string>()
   claude.addPreamble((s, o) => {
-    if (!agentCapabilities(s.harness).autopilot || o.role || s.origin_kind === 'proposal' || (s.harness === 't3code' && s.origin_kind === 'assistant')) return []
+    if (!agentCapabilities(s.harness).autopilot || o.role || s.origin_kind === 'proposal' || s.origin_kind === 'subagent' || (s.harness === 't3code' && s.origin_kind === 'assistant')) return []
     if (!supervising.has(s.id)) {
       // The member wrote in it themself: whatever it waited for them on is theirs now.
       if (q.resolveSession.run(Math.floor(now() / 1000), s.id).changes) changed(s.owner_id)
@@ -283,8 +283,8 @@ export function autopilotService({ db, hub, claude, notify, team = () => undefin
     const s = sessionId ? (q.session.get(sessionId) as { id: string; harness: string; owner_id: number; cwd: string; title: string; archived: number; origin_kind: string | null; project_slug: string | null; owner_username: string } | undefined) : undefined
     if (!s || s.owner_username !== username) throw new AppError(403, 'not_yours', 'Autopilot works only in your own DevDash sessions.')
     if (!agentCapabilities(s.harness).autopilot) throw new AppError(403, 'not_autopilot', "Autopilot doesn't apply to this agent.")
-    if (s.origin_kind === 'proposal' || claude.ownedActive(username, s.id).some((x) => x.role)) {
-      throw new AppError(403, 'not_autopilot', "Autopilot doesn't apply in a team role's session: ask as usual.")
+    if (s.origin_kind === 'proposal' || s.origin_kind === 'subagent' || claude.ownedActive(username, s.id).some((x) => x.role)) {
+      throw new AppError(403, 'not_autopilot', "Autopilot doesn't apply in a subagent or team role's session: ask as usual.")
     }
     const last = q.lastSender.get(s.id) as { user_id: number } | undefined
     if (last && last.user_id !== s.owner_id) {
@@ -306,7 +306,7 @@ export function autopilotService({ db, hub, claude, notify, team = () => undefin
       const goal = (q.goal.get(s.id, user.id) as { message_uuid: string } | undefined)?.message_uuid ?? null
       const c: Candidate = {
         status: s.status, mode: s.mode, started: !!s.started, archived: !!s.archived,
-        excluded: s.role || s.origin_kind === 'assistant' || s.origin_kind === 'proposal',
+        excluded: s.role || s.origin_kind === 'assistant' || s.origin_kind === 'proposal' || s.origin_kind === 'subagent',
         viewers: hub.viewers(`session:${s.id}`).length, lastActivity: s.last_activity_at,
         lastSender: last ? (last.user_id === user.id ? 'owner' : 'teammate') : null,
         goal, statusDetail: s.status_detail,
@@ -478,12 +478,12 @@ export function autopilotService({ db, hub, claude, notify, team = () => undefin
     }
     busy.add(s.id)
     try {
-      if (s.harness === 't3code' && s.status === 'waiting') {
+      const pending = s.status === 'waiting' ? ((await claude.get(user, s.id)).pending as Pending[]) : []
+      if (s.harness === 't3code' && s.status === 'waiting' && !pending.length) {
         toInbox(user.id, { sessionId: s.id, kind: 'permission', title: `T3 Code needs your reply: ${s.title}`, detail: 'Open the native T3 conversation to answer its request.' })
         done.push({ user: user.id, session: s.id, what: 'permission' })
         return
       }
-      const pending = s.status === 'waiting' ? ((await claude.get(user, s.id)).pending as Pending[]) : []
       const prompt = pending.find((p) => p.toolName !== 'AskUserQuestion')
       if (followed && !prompt) return
       const never = prompt && (r.approvals ? neverApprove(prompt) : 'approvals are yours (Autopilot handles approvals is off)')
@@ -547,6 +547,11 @@ export function autopilotService({ db, hub, claude, notify, team = () => undefin
       q.remember.run(s.id, c.goal, c.memory.goal === c.goal ? c.memory.nudges : 0, c.memory.lastError, c.lastActivity)
       if (USAGE_LIMIT_RE.test((err as Error).message)) {
         pause(user, nowS + 3600, 'The Claude usage limit is hit')
+        return 'stop'
+      }
+      if (r.sv_harness === DEFAULTS.svHarness && /not installed|enoent/i.test((err as Error).message)) {
+        toInbox(user.id, { sessionId: s.id, kind: 'stuck', title: `Supervisor could not review ${s.title}`,
+          detail: 'Claude Code is not installed for the supervisor. Choose an installed supervisor model in Autopilot settings.' })
         return 'stop'
       }
       svFallbackOnError(user, r, (err as Error).message)

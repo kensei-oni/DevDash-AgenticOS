@@ -364,14 +364,14 @@ export function followService({ db, hub, agents, claude, assistant, autopilot, n
   }
 
   /** A wake turn's automatic reply: only in their chat, only to a followed session, only within autopilot. */
-  async function gate(user: User, chatId: string, sessionId: string, args: Record<string, unknown>) {
+  async function gate(user: User, chatId: string, sessionId: string, args: Record<string, unknown>, allowBridgedQuestion = false) {
     if (assistant.state(user).sessionId !== chatId) throw new AppError(400, 'bad_args', 'Only in your chat with them.')
     if (claude.typedByOwner(chatId)) throw new AppError(400, 'bad_args', `${first(user)} is writing to you now: do what they ask with session_send.`)
     const f = q.get.get(user.id, sessionId) as FollowRow | undefined
     if (!f || !on(user.id)) throw new AppError(400, 'bad_args', "You don't follow that session: tell them instead.")
     const s = sessionOf(sessionId)
     if (!s || s.archived) throw new AppError(404, 'not_found', 'The session is gone.')
-    if (s.harness === 't3code' && s.status === 'waiting') throw new AppError(409, 'native_request', 'Open the native T3 conversation to answer its request.')
+    if (!allowBridgedQuestion && s.harness === 't3code' && s.status === 'waiting') throw new AppError(409, 'native_request', 'Open the native T3 conversation to answer its request.')
     const w = waking.get(chatId)
     const last = lastMsg(sessionId)
     const no = mayReply({
@@ -441,12 +441,15 @@ export function followService({ db, hub, agents, claude, assistant, autopilot, n
   agents.onRpc('mcp.follow_answer', async (username, params) => {
     const c = ctx(username, params)
     const id = str(c.args.id, 'the session id')
-    const g = await gate(c.user, c.chatId, id, c.args)
+    const g = await gate(c.user, c.chatId, id, c.args, true)
     type P = { requestId: string; toolName: string; ownerOnly?: boolean; askedBy?: unknown; input?: Record<string, unknown> & { questions?: { question?: string }[] } }
     const pending = (await claude.get(c.user, id)).pending as P[]
     if (pending.some((p) => p.toolName !== 'AskUserQuestion')) throw new AppError(403, 'permission', `It waits for a permission: only ${first(c.user)} decides those. Tell them.`)
     const qn = pending.find((p) => p.toolName === 'AskUserQuestion')
-    if (!qn) throw new AppError(409, 'no_question', 'It has no question waiting: use follow_reply, or tell them.')
+    if (!qn) {
+      if (g.s.harness === 't3code' && g.s.status === 'waiting') throw new AppError(409, 'native_request', 'Open the native T3 conversation to answer its request.')
+      throw new AppError(409, 'no_question', 'It has no question waiting: use follow_reply, or tell them.')
+    }
     if (qn.ownerOnly || qn.askedBy) throw new AppError(403, 'owner_only', `Only ${first(c.user)} answers this one.`)
     const questions = (qn.input?.questions ?? []).map((x) => x.question ?? '')
     const red = redQuestion(questions.join(' '))

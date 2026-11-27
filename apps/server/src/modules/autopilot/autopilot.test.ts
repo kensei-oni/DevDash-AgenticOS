@@ -797,3 +797,31 @@ test('a T3 supervisor cannot answer a team ask after its project is turned off m
   await t.autopilot.teamAsks(t.yo)
   assert.equal(answers.length, 1)
 })
+
+test('subagent sessions never receive autopilot preambles/t3Autopilot and are excluded from sweeps; bridged T3 AskUserQuestion is answered', async () => {
+  const t = setup()
+  await t.autopilot.setSettings(t.yo, { t3Sessions: true })
+  t.autopilot.setEnabled(t.yo, true)
+
+  // 1) Subagent session on T3 Code must NOT get autopilot preamble or t3Autopilot flag, nor be nudged by sweep
+  t.session('sub-1')
+  t.db.prepare("update claude_sessions set harness = 't3code', origin_kind = 'subagent', permission_mode = 'bypassPermissions', drive = 0 where id = 'sub-1'").run()
+  await t.claude.send(t.yo, 'sub-1', 'Run task', [])
+  const subSend = t.sent.filter((r) => r.op === 'claude.send').at(-1)!
+  assert.equal(subSend.t3Autopilot, undefined)
+  assert.doesNotMatch(JSON.stringify(subSend.content), /Autopilot is ON/)
+  assert.deepEqual(await t.autopilot.sweep(), [])
+
+  // 2) Normal T3 Code session waiting on a bridged AskUserQuestion is answered by Autopilot instead of parked as native-only
+  t.session('t3-q', { status: 'waiting' })
+  t.db.prepare("update claude_sessions set harness = 't3code', permission_mode = 'bypassPermissions', drive = 0 where id = 't3-q'").run()
+  t.reply.pending = [{
+    requestId: 'req-q1',
+    toolName: 'AskUserQuestion',
+    input: { questions: [{ question: 'Which port?', options: [{ label: '3000' }, { label: '8080' }] }] },
+  }]
+  t.reply.decision = '{"action":"answer","tier":"green","answers":{"Which port?":"3000"},"why":"standard dev port"}'
+  const swept = await t.autopilot.sweep()
+  assert.equal(swept.some((x) => x.session === 't3-q' && x.what === 'answer'), true)
+  assert.equal(t.sent.some((r) => r.op === 'claude.answer' && r.id === 't3-q' && r.requestId === 'req-q1'), true)
+})

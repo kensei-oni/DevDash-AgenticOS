@@ -297,6 +297,33 @@ function normalizeRawStep(input: unknown): unknown {
     obj.kind = KIND_ALIASES[trimmed.toLowerCase()] ?? trimmed
   }
 
+  // Normalize common field aliases emitted by non-Claude models (e.g. Gemini / OpenCode).
+  if (obj.kind === 'done' && (typeof obj.reply !== 'string' || !obj.reply.trim())) {
+    for (const k of ['result', 'summary', 'message', 'answer', 'text'] as const) {
+      if (typeof obj[k] === 'string' && (obj[k] as string).trim()) {
+        obj.reply = obj[k]
+        break
+      }
+    }
+  }
+  if (obj.kind === 'ask_user' && (typeof obj.reason !== 'string' || !obj.reason.trim())) {
+    for (const k of ['message', 'question', 'prompt', 'text'] as const) {
+      if (typeof obj[k] === 'string' && (obj[k] as string).trim()) {
+        obj.reason = obj[k]
+        break
+      }
+    }
+  }
+  if ((obj.kind === 'navigate' || obj.kind === 'open') && typeof obj.url !== 'string' && typeof obj.href === 'string') {
+    obj.url = obj.href
+  }
+  if ((obj.kind === 'wait' || obj.kind === 'wait_for') && obj.ms === undefined) {
+    if (typeof obj.timeoutMs === 'number' && Number.isFinite(obj.timeoutMs)) obj.ms = obj.timeoutMs
+    else if (typeof obj.timeout === 'number' && Number.isFinite(obj.timeout)) obj.ms = obj.timeout
+    else if (typeof obj.seconds === 'number' && Number.isFinite(obj.seconds)) obj.ms = obj.seconds * 1000
+    else if (typeof obj.sec === 'number' && Number.isFinite(obj.sec)) obj.ms = obj.sec * 1000
+  }
+
   // Safely truncate metadata strings so an overly wordy thought/summary never kills a multi-step run.
   if (typeof obj.thought === 'string') obj.thought = obj.thought.trim().slice(0, 240)
   if (typeof obj.reply === 'string') obj.reply = obj.reply.slice(0, 8000)

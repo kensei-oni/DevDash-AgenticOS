@@ -1,11 +1,15 @@
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import type { Socket } from 'node:net'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import pty from 'node-pty'
 
-export const TMUX_CONF = fileURLToPath(new URL('../../../deploy/tmux.conf', import.meta.url))
+const resolvedTmuxConf = fileURLToPath(new URL('../../../deploy/tmux.conf', import.meta.url))
+export const TMUX_CONF = resolvedTmuxConf.startsWith('/opt/devdash/releases/') && existsSync('/opt/devdash/current/deploy/tmux.conf')
+  ? '/opt/devdash/current/deploy/tmux.conf'
+  : resolvedTmuxConf
 // A dedicated tmux server, so SSH users can join the same terminals: tmux -L devdash attach -t t-main
 const TMUX = ['-L', 'devdash', '-f', TMUX_CONF]
 const run = promisify(execFile)

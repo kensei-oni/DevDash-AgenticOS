@@ -72,7 +72,7 @@ async function withEffort(picked: Selection, level: string | null): Promise<Sele
   if (!model) throw new Error('That model is not available from a connected T3 Code provider.')
   const opt = effortOption(model)
   const options = (picked.options ?? []).filter((o) => o.id !== opt?.id)
-  if (level && level !== 'default') {
+  if (level && level !== 'default' && level !== 't3:default') {
     if (!opt?.levels.includes(level)) throw new Error('That effort level is not available for this T3 Code model.')
     options.push({ id: opt.id, value: level })
   }
@@ -315,7 +315,7 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
     thread = { ...thread, providerInstanceId: current.instanceId, model: current.model }
     const opt = effortOption(await findModel(current))
     const savedLevel = current.options?.find((o) => o.id === opt?.id)?.value
-    effort = typeof savedLevel === 'string' ? savedLevel : 'default'
+    effort = typeof savedLevel === 'string' && savedLevel !== 't3:default' ? savedLevel : 'default'
     trackDevDashRuns(data.items)
     await transcribe(data.items, true)
     return { configOptions: configOptions() }
@@ -326,7 +326,7 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
   },
   'session/set_config_option': (p) => {
     if (p.configId === 'model') return setSelection(String(p.value), null)
-    if (p.configId === 'effort') return setSelection(null, p.value === 'default' ? null : String(p.value))
+    if (p.configId === 'effort') return setSelection(null, p.value === 'default' || p.value === 't3:default' ? null : String(p.value))
     throw new Error('Unknown T3 Code option.')
   },
   'session/prompt': async (p) => {

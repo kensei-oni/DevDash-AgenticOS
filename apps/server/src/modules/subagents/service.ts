@@ -746,8 +746,13 @@ export function subagentsService({
     const subDef = getDefaults(session.owner_id)
     if (!rows.length && !subDef.harness) return []
     const defTag = subDef.model ? ` [${subDef.model.replace(/^.*\//, '')}${subDef.effort ? ` · ${subDef.effort}` : ''}]` : ''
+    const isT3 = session.harness === 't3code'
+    const cliPrefix = isT3 ? `DEVDASH_SESSION_ID=${session.id} devdash subagent` : 'devdash subagent'
+    const how = isT3
+      ? `Invoke DevDash subagents anytime via your shell with \`${cliPrefix} run <slug> "<task>"\` or \`${cliPrefix} delegate "<task>"\` (plus \`batch\`, \`send <runId> "<msg>"\`, \`status\`, \`ls\`, \`stop\`), or via this turn's DevDash workflow helper (\`call subagent_run\` / \`subagent_delegate\`) when provided — use these instead of T3's built-in delegate_task whenever calling a DevDash custom subagent`
+      : `MCP: subagent_delegate, subagent_batch, subagent_send, subagent_run, subagent_status, subagent_stop, subagents_list; CLI: \`${cliPrefix} delegate|batch|send|run|status|ls|stop\``
     const lines = [
-      `- general (General Subagent)${defTag}: Delegate ANY coding, debugging, testing, shell, or research task ad-hoc via subagent_delegate / subagent_batch / subagent_send (or \`devdash subagent delegate "<task>"\` in Bash; add worktree:true / --worktree for isolated parallel code edits).`,
+      `- general (General Subagent)${defTag}: Delegate ANY coding, debugging, testing, shell, or research task ad-hoc via subagent_delegate / subagent_batch / subagent_send (or \`${cliPrefix} delegate "<task>"\` in shell; add worktree:true / --worktree for isolated parallel code edits).`,
       ...rows.map((r) => {
         const m = r.model ?? (!r.harness ? subDef.model : null)
         const tag = m ? ` [${m.replace(/^.*\//, '')}]` : ''
@@ -756,7 +761,7 @@ export function subagentsService({
     ].join('\n')
     return [{
       type: 'text',
-      text: `<system-reminder>DevDash subagents available to you (MCP: subagent_delegate, subagent_batch, subagent_send, subagent_run, subagent_status, subagent_stop, subagents_list; CLI: \`devdash subagent delegate|batch|send|run|status|ls|stop\`). Delegate general sub-tasks (parallel implementation in worktrees, testing, debugging, multi-file search, or web research) and continue runs with subagent_send when helpful:\n${lines}</system-reminder>`,
+      text: `<system-reminder>DevDash subagents available to you (${how}). Delegate general or specialist sub-tasks (parallel implementation in worktrees, testing, debugging, multi-file search, or web research) and continue runs with subagent_send / \`${cliPrefix} send\` when helpful:\n${lines}</system-reminder>`,
     }]
   })
 
@@ -1261,7 +1266,18 @@ export function subagentsService({
         const c = (params ?? {}) as RpcCtx
         const user = q.userByName.get(username) as User | undefined
         if (!user) throw new AppError(403, 'forbidden', 'Unknown member.')
-        const sessionId = typeof c.sessionId === 'string' && c.sessionId.trim() ? c.sessionId.trim() : null
+        let sessionId = typeof c.sessionId === 'string' && c.sessionId.trim() ? c.sessionId.trim() : null
+        const rawCwd = typeof c.cwd === 'string' && c.cwd.trim() ? c.cwd.trim() : undefined
+        // T3 Code runs inside the member's long-lived T3 daemon where DEVDASH_SESSION_ID may not be exported if a subagent invokes bare `devdash subagent ...`.
+        if (!sessionId && rawCwd) {
+          const activeSubInCwd = (q.activeRuns.all(user.id) as RunRow[]).find((r) => r.session_id && r.cwd === rawCwd)
+          if (activeSubInCwd?.session_id) {
+            const nonSubWorkingInCwd = claude.ownedActive(username).some(
+              (os) => os.status === 'working' && os.cwd === rawCwd && os.origin_kind !== 'subagent' && !q.runBySession.get(os.id),
+            )
+            if (!nonSubWorkingInCwd) sessionId = activeSubInCwd.session_id
+          }
+        }
         const s = sessionId ? (q.sessionInfo.get(sessionId) as { id: string; owner_id: number; title: string; origin_kind: string | null; cwd: string; project_id: number | null } | undefined) : undefined
         const isHamasa = s?.origin_kind === 'assistant'
         const blocked = Boolean(sessionId && (isSubagentSession(sessionId) || s?.origin_kind === 'proposal' || isRole?.(username, sessionId)))
@@ -1269,7 +1285,7 @@ export function subagentsService({
         return {
           user,
           sessionId,
-          cwd: typeof c.cwd === 'string' && c.cwd.trim() ? c.cwd.trim() : s?.cwd,
+          cwd: rawCwd ?? s?.cwd,
           projectSlug,
           isHamasa,
           blocked,

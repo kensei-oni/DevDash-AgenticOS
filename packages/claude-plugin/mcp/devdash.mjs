@@ -195,7 +195,10 @@ async function listTools() {
     const [team, deploy, net, assistant, autopilot, subagents] = await Promise.all([teamTools(call, context), deployTools(), netTools(), assistantTools(call, context), autopilotTools(call, context), subagentTools()])
     return [...TOOLS, ...deploy, ...net, ...team, ...assistant, ...autopilot, ...subagents]
   }
-  if (workflow === 'autopilot') return autopilotTools(call, context)
+  if (workflow === 'autopilot') {
+    const [autopilot, subagents] = await Promise.all([autopilotTools(call, context), subagentTools()])
+    return [...autopilot, ...subagents]
+  }
   if (workflow !== 'hamasa') throw new Error('Unknown DevDash workflow.')
   const assistant = await assistantTools(call, context)
   if (!assistant.length) throw new Error('Hamasa tools require an active personal agent session.')

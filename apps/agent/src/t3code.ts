@@ -38,7 +38,7 @@ export function selection(value: string) {
 export function effortOption(model: Model | undefined) {
   const opt = model?.options?.find((o) => /reasoning.*effort|thinking[_-]?level|thought[_-]?level|^(effort|variant)$/i.test(o.id))
   if (!opt) return undefined
-  return { id: opt.id, levels: opt.values.filter((v): v is string => typeof v === 'string' && v !== 'default') }
+  return { id: opt.id, levels: opt.values.filter((v): v is string => typeof v === 'string' && v !== 'default' && v !== 't3:default') }
 }
 /** T3's runnable flag includes enabled state, executable availability and authentication checks.
  * Its catalog also contains disabled providers and their models, which must not be offered as connected. */

@@ -640,7 +640,7 @@ async function runTurns(c: Chat) {
         const subagentContext = c.launch.harness === 't3code' && c.fresh && c.launch.originKind === 'subagent' && c.launch.instructions?.trim()
           ? c.launch.instructions.trim()
           : undefined
-        const workflowContext = helper?.context ?? subagentContext
+        const workflowContext = [subagentContext, helper?.context].filter(Boolean).join('\n\n') || undefined
         const r = await c.rpc.request<{ stopReason: string; usage?: Usage }>('session/prompt', {
           sessionId: c.sessionId,
           prompt,
@@ -717,7 +717,7 @@ export const send = (l: Launch, content: unknown[], uuid: string, guest: Guest |
   let workflow: Chat['queue'][number]['workflow']
   if (l.harness === 't3code' && !guest) {
     if (l.originKind === 'assistant') workflow = { kind: 'hamasa', instructions: l.instructions }
-    else if (t3Autopilot) workflow = { kind: 'autopilot' }
+    else if (t3Autopilot && l.originKind !== 'subagent' && l.originKind !== 'proposal') workflow = { kind: 'autopilot' }
   }
   c.queue.push({ content, uuid, guest: !!guest, workflow })
   c.lastActive = Date.now()

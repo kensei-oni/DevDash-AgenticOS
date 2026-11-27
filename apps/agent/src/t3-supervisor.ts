@@ -147,17 +147,27 @@ function openCodeWorkerKey(bin: string): { slot: string; key: string } {
   return { slot: bin, key: `${bin}:${st.mtimeMs}:${st.size}` }
 }
 
-async function fetchOpenCodeCatalog(endpoint: string, headers: Record<string, string>, signal: AbortSignal): Promise<OpenCodeModel[]> {
+async function fetchOpenCodeCatalog(endpoint: string, headers: Record<string, string>, signal: AbortSignal, waitForInitial = false): Promise<OpenCodeModel[]> {
   const catalogUrl = new URL('/api/model', endpoint)
-  let response = await openCodeMemberFetch(catalogUrl, { method: 'GET', headers, signal })
-  while (response.status === 503) { // The server is listening while the member's provider plugins are starting.
-    await response.body?.cancel()
-    await delay(150, undefined, { signal })
-    response = await openCodeMemberFetch(catalogUrl, { method: 'GET', headers, signal })
+  let emptyPolls = 0
+  while (true) {
+    const response = await openCodeMemberFetch(catalogUrl, { method: 'GET', headers, signal })
+    if (response.status === 503) { // The server is listening while the member's provider plugins are starting.
+      await response.body?.cancel()
+      await delay(150, undefined, { signal })
+      continue
+    }
+    if (!response.ok) { await response.body?.cancel(); throw new Error('The local OpenCode supervisor model catalog is unavailable.') }
+    const json = await response.json() as { data?: { providerID: string; id: string; enabled: boolean; variants: { id: string }[] }[] }
+    const rows = Array.isArray(json.data) ? json.data : []
+    // OpenCode 2.4+ responds 200 with { data: [] } for the first ~150-500ms while async provider catalogs initialize.
+    if (waitForInitial && rows.length === 0 && emptyPolls < 20) {
+      emptyPolls++
+      await delay(150, undefined, { signal })
+      continue
+    }
+    return rows.filter((m) => m.enabled).map((m) => ({ providerID: m.providerID, id: m.id, variants: m.variants.map((v) => v.id) }))
   }
-  if (!response.ok) { await response.body?.cancel(); throw new Error('The local OpenCode supervisor model catalog is unavailable.') }
-  const json = await response.json() as { data: { providerID: string; id: string; enabled: boolean; variants: { id: string }[] }[] }
-  return json.data.filter((m) => m.enabled).map((m) => ({ providerID: m.providerID, id: m.id, variants: m.variants.map((v) => v.id) }))
 }
 
 async function verifyOpenCodeAuth(endpoint: string, signal: AbortSignal): Promise<void> {
@@ -240,7 +250,7 @@ async function startOpenCodeWorker(bin: string, slot: string, key: string, start
     }
     worker.endpoint = endpoint
     await verifyOpenCodeAuth(endpoint, starting)
-    worker.models = await fetchOpenCodeCatalog(endpoint, headers, starting)
+    worker.models = await fetchOpenCodeCatalog(endpoint, headers, starting, true)
     worker.modelsAt = Date.now()
     worker.touch(idleMs)
     return worker
@@ -289,9 +299,9 @@ async function withOpenCode<T>(
       if (options.verifyAuth) {
         try { await verifyOpenCodeAuth(w.endpoint, starting) } catch (err) { poisoned = true; throw err }
       }
-      if ((options.refreshCatalog && Date.now() - w.modelsAt > 10_000) || Date.now() - w.modelsAt > 60_000) {
+      if (!w.models.length || (options.refreshCatalog && Date.now() - w.modelsAt > 10_000) || Date.now() - w.modelsAt > 60_000) {
         try {
-          w.models = await fetchOpenCodeCatalog(w.endpoint, w.headers, starting)
+          w.models = await fetchOpenCodeCatalog(w.endpoint, w.headers, starting, !w.models.length)
           w.modelsAt = Date.now()
         } catch (err) { poisoned = true; throw err }
       }

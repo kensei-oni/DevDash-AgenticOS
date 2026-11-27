@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { memberAuthFetch, memberWsUpgrade } from './t3-local.ts'
+import { effortOption } from './t3code.ts'
 import { buildUsageWindowQuery, closeUsageClient, getUsageLimits, getUsageSummary, setUsageEmitter } from './t3-usage.ts'
 
 test('buildUsageWindowQuery builds 24h hourly and 7d/30d/90d daily T3 usage queries with timezone fallback', () => {
@@ -51,14 +52,21 @@ test('live member T3 usage RPC fetches limits, streams live refresh notification
     t.skip('live member T3 usage test runs as an unprivileged DevDash member')
     return
   }
+  assert.deepEqual(
+    effortOption({ id: 'atria/atria-dawn-preview', options: [{ id: 'variant', values: ['default', 't3:default', 'low', 'medium', 'high'] }] }),
+    { id: 'variant', levels: ['low', 'medium', 'high'] },
+  )
+  closeUsageClient()
   let pushEvents = 0
   setUsageEmitter(() => { pushEvents += 1 })
   try {
-    const limits = await getUsageLimits({ refresh: true })
-    if (!limits.connected) {
+    const coldLimits = await getUsageLimits({ refresh: false })
+    if (!coldLimits.connected) {
       t.skip('member does not have an active T3 Code connection')
       return
     }
+    assert.ok(Array.isArray(coldLimits.accounts))
+    const limits = await getUsageLimits({ refresh: true })
     assert.ok(Array.isArray(limits.accounts))
     assert.ok(pushEvents >= 1, 'live usage emitter should fire when limits refresh')
     const summary = await getUsageSummary({ period: 'week', timeZone: 'UTC', refresh: false })

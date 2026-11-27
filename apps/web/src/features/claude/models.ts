@@ -80,4 +80,5 @@ export function effortLevels(models: ModelInfo[], value: string | null | undefin
   return levels?.length ? standard.filter((e) => levels.includes(e)) : [...standard]
 }
 
-export const effortLabel = (value: string) => value === 'xhigh' ? 'Extra high' : value.charAt(0).toUpperCase() + value.slice(1)
+export const effortLabel = (value: string) =>
+  value === 'xhigh' ? 'Extra high' : value === 't3:default' ? 'Default' : value.charAt(0).toUpperCase() + value.slice(1)

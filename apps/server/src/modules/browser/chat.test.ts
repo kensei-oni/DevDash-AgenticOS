@@ -633,14 +633,15 @@ test('normalizes verbose thoughts, long wait budgets, bracketed refs, plan synon
         })}\n\`\`\`\nLet me know if you want anything else.`
       }
       if (callCount === 2) {
-        // Over-budget wait ms (25000 -> clamped to 15000)
-        return JSON.stringify({ kind: 'wait_for', ms: 25000 })
+        // Over-budget wait seconds alias (25s -> clamped to 15000ms)
+        return JSON.stringify({ kind: 'wait_for', seconds: 25 })
       }
       if (callCount === 3) {
         // Malformed output -> should trigger 1 automatic retry instead of failing the run!
         return 'Oops I forgot to wrap this as JSON.'
       }
-      return JSON.stringify({ kind: 'done', reply: 'Download 89.96 Mbps, Upload 88.22 Mbps.' })
+      // Done using 'summary' alias instead of 'reply' (emitted by Gemini / OpenCode models)
+      return JSON.stringify({ kind: 'done', summary: 'Download 89.96 Mbps, Upload 88.22 Mbps.' })
     },
   )
 

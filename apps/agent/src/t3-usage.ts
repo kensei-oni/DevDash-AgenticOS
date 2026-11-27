@@ -421,7 +421,7 @@ class T3RpcConnection {
   private recv: Buffer
   private nextId = 1
   private pending = new Map<string, PendingCall>()
-  private subscriptions = new Map<string, (v: unknown) => void>()
+  private subscriptions = new Map<string, { onChunk: (v: unknown) => void; onClose?: (err: Error) => void; awaitingInitial: boolean }>()
   private fragOpcode = 0
   private fragChunks: Buffer[] = []
   private closed = false
@@ -447,14 +447,22 @@ class T3RpcConnection {
     this.bumpIdle()
   }
 
+  private hasAwaitingSub(): boolean {
+    for (const sub of this.subscriptions.values()) {
+      if (sub.awaitingInitial) return true
+    }
+    return false
+  }
+
   private bumpIdle(): void {
-    if (this.idleTimer) clearTimeout(this.idleTimer)
+    if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null }
     if (this.closed) return
-    if (this.pending.size > 0) {
+    if (this.pending.size > 0 || this.hasAwaitingSub()) {
       this.socket.ref?.()
       return
     }
     this.socket.unref?.()
+    if (this.subscriptions.size > 0) return
     this.idleTimer = setTimeout(() => this.close(), IDLE_CLOSE_MS)
     this.idleTimer.unref?.()
   }
@@ -471,7 +479,11 @@ class T3RpcConnection {
   private failAll(err: Error): void {
     this.closed = true
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null }
+    const subs = [...this.subscriptions.values()]
     this.subscriptions.clear()
+    for (const sub of subs) {
+      try { sub.onClose?.(err) } catch { /* ignore */ }
+    }
     for (const [, p] of this.pending) {
       clearTimeout(p.timer)
       p.reject(err)
@@ -484,16 +496,35 @@ class T3RpcConnection {
     this.socket.write(encodeWsFrame(0x1, Buffer.from(JSON.stringify(msg), 'utf8')))
   }
 
-  subscribe(tag: string, payload: Record<string, unknown>, onChunk: (v: unknown) => void): () => void {
+  subscribe(
+    tag: string,
+    payload: Record<string, unknown>,
+    onChunk: (v: unknown, markReady: () => void) => void,
+    onClose?: (err: Error) => void,
+  ): () => void {
     const id = String(this.nextId++)
-    this.subscriptions.set(id, onChunk)
+    const entry = {
+      awaitingInitial: true,
+      onClose,
+      onChunk: (v: unknown) => onChunk(v, () => {
+        if (entry.awaitingInitial) {
+          entry.awaitingInitial = false
+          this.bumpIdle()
+        }
+      }),
+    }
+    this.subscriptions.set(id, entry)
+    this.bumpIdle()
     try {
       this.sendJson({ _tag: 'Request', id, tag, payload, headers: [] })
-    } catch {
+    } catch (err) {
       this.subscriptions.delete(id)
+      this.bumpIdle()
+      onClose?.(err instanceof Error ? err : new Error(String(err)))
     }
     return () => {
       if (!this.subscriptions.delete(id)) return
+      this.bumpIdle()
       try { this.sendJson({ _tag: 'Interrupt', requestId: id, interruptors: [] }) } catch { /* ignore */ }
     }
   }
@@ -629,9 +660,12 @@ class T3RpcConnection {
       if (sub) {
         if (msg._tag === 'Chunk' && Array.isArray(msg.values)) {
           try { this.sendJson({ _tag: 'Ack', requestId: reqId }) } catch { /* ignore */ }
-          for (const v of msg.values) sub(v)
+          for (const v of msg.values) sub.onChunk(v)
         } else if (msg._tag === 'Exit') {
           this.subscriptions.delete(reqId)
+          this.bumpIdle()
+          const exit = msg.exit as { _tag?: string; cause?: unknown } | undefined
+          sub.onClose?.(new Error(exit?._tag === 'Failure' ? extractRpcError(exit.cause) : 'T3 Code subscription ended.'))
         }
         continue
       }
@@ -733,6 +767,7 @@ function ensureLiveConfig(conn: T3RpcConnection): LiveConfigCache {
     resolveReady = res
     rejectReady = rej
   })
+  ready.catch(() => {})
   const state: LiveConfigCache = {
     conn,
     providers: [],
@@ -740,32 +775,47 @@ function ensureLiveConfig(conn: T3RpcConnection): LiveConfigCache {
     hasSnapshot: false,
     ready,
   }
+  let unsubscribe = () => {}
   const initTimer = setTimeout(() => {
-    if (!state.hasSnapshot) rejectReady(new Error('Timed out waiting for T3 Code subscribeServerConfig snapshot.'))
+    if (!state.hasSnapshot) {
+      if (liveConfig === state) liveConfig = null
+      unsubscribe()
+      rejectReady(new Error('Timed out waiting for T3 Code subscribeServerConfig snapshot.'))
+    }
   }, 15_000)
   initTimer.unref?.()
 
-  conn.subscribe('subscribeServerConfig', { usageLimitSources: true, usageLimitsCommand: true }, (raw) => {
-    if (!raw || typeof raw !== 'object') return
-    const ev = raw as { type?: string; config?: Record<string, unknown>; payload?: Record<string, unknown> }
-    if (ev.type === 'snapshot' && ev.config && typeof ev.config === 'object') {
-      state.providers = Array.isArray(ev.config.providers) ? ev.config.providers as Record<string, unknown>[] : []
-      state.sources = Array.isArray(ev.config.usageLimitSources) ? ev.config.usageLimitSources as Record<string, unknown>[] : []
-      if (!state.hasSnapshot) {
-        state.hasSnapshot = true
-        clearTimeout(initTimer)
-        resolveReady()
-      } else {
+  unsubscribe = conn.subscribe(
+    'subscribeServerConfig',
+    { usageLimitSources: true, usageLimitsCommand: true },
+    (raw, markReady) => {
+      if (!raw || typeof raw !== 'object') return
+      const ev = raw as { type?: string; config?: Record<string, unknown>; payload?: Record<string, unknown> }
+      if (ev.type === 'snapshot' && ev.config && typeof ev.config === 'object') {
+        state.providers = Array.isArray(ev.config.providers) ? ev.config.providers as Record<string, unknown>[] : []
+        state.sources = Array.isArray(ev.config.usageLimitSources) ? ev.config.usageLimitSources as Record<string, unknown>[] : []
+        if (!state.hasSnapshot) {
+          state.hasSnapshot = true
+          clearTimeout(initTimer)
+          markReady()
+          resolveReady()
+        } else {
+          notifyUsageUpdated()
+        }
+      } else if (ev.type === 'providerStatuses' && ev.payload && Array.isArray(ev.payload.providers)) {
+        state.providers = ev.payload.providers as Record<string, unknown>[]
+        notifyUsageUpdated()
+      } else if (ev.type === 'usageLimitSourcesUpdated' && ev.payload && Array.isArray(ev.payload.sources)) {
+        state.sources = ev.payload.sources as Record<string, unknown>[]
         notifyUsageUpdated()
       }
-    } else if (ev.type === 'providerStatuses' && ev.payload && Array.isArray(ev.payload.providers)) {
-      state.providers = ev.payload.providers as Record<string, unknown>[]
-      notifyUsageUpdated()
-    } else if (ev.type === 'usageLimitSourcesUpdated' && ev.payload && Array.isArray(ev.payload.sources)) {
-      state.sources = ev.payload.sources as Record<string, unknown>[]
-      notifyUsageUpdated()
-    }
-  })
+    },
+    (err) => {
+      clearTimeout(initTimer)
+      if (liveConfig === state) liveConfig = null
+      if (!state.hasSnapshot) rejectReady(err)
+    },
+  )
 
   liveConfig = state
   return state

@@ -101,6 +101,7 @@ async function runSubagentCli(cmd: string | undefined, rest: string[]) {
       role: { type: 'string' },
       instructions: { type: 'string' },
       subagent: { type: 'string' },
+      session: { type: 'string' },
       project: { type: 'string' },
       cwd: { type: 'string' },
       worktree: { type: 'boolean' },
@@ -115,7 +116,7 @@ async function runSubagentCli(cmd: string | undefined, rest: string[]) {
   })
   const mcpCall = (name: string, args: Record<string, unknown> = {}) =>
     call(`mcp.${name}`, {
-      sessionId: process.env.DEVDASH_SESSION_ID || null,
+      sessionId: values.session || process.env.DEVDASH_SESSION_ID || null,
       cwd: values.cwd ?? process.cwd(),
       args,
     })
