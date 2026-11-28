@@ -7,6 +7,7 @@ import {
   formatResetCountdown,
   formatShare,
   formatUsd,
+  groupLimitWindows,
   validateT3UsageSearch,
   type T3SummaryShape,
 } from './t3-usage-math.ts'
@@ -193,4 +194,26 @@ test('aggregateT3Usage deduplicates physicalSourceId sources, respects provider 
   assert.equal(Math.round(codexOnly.costUsd * 100), 45)
   assert.equal(codexOnly.models.length, 1)
   assert.equal(codexOnly.models[0]!.model, 'gpt-5.4')
+})
+
+test('groupLimitWindows keeps ungrouped windows flat and groups consecutive Antigravity model pools', () => {
+  const flat = groupLimitWindows([
+    { id: 's', kind: 'session', label: 'Session', usedPercent: 20, remainingPercent: 80, resetsAt: null, windowDurationMins: 300 },
+    { id: 'w', kind: 'weekly', label: 'Weekly', usedPercent: 40, remainingPercent: 60, resetsAt: null, windowDurationMins: 10080 },
+  ])
+  assert.equal(flat.length, 1)
+  assert.equal(flat[0]?.group, null)
+  assert.equal(flat[0]?.windows.length, 2)
+
+  const grouped = groupLimitWindows([
+    { id: 'g-5h', kind: 'session', label: 'Session', group: 'Gemini models', groupDetail: 'Gemini 4 Carbon, Gemini 4 Neon', usedPercent: 7, remainingPercent: 93, resetsAt: null, windowDurationMins: 300 },
+    { id: 'g-wk', kind: 'weekly', label: 'Weekly', group: 'Gemini models', groupDetail: 'Gemini 4 Carbon, Gemini 4 Neon', usedPercent: 61, remainingPercent: 39, resetsAt: null, windowDurationMins: 10080 },
+    { id: '3p-5h', kind: 'session', label: 'Session', group: 'Claude & GPT models', groupDetail: 'Claude Opus 5.5', usedPercent: 0, remainingPercent: 100, resetsAt: null, windowDurationMins: 300 },
+    { id: '3p-wk', kind: 'weekly', label: 'Weekly', group: 'Claude & GPT models', groupDetail: 'Claude Opus 5.5', usedPercent: 0, remainingPercent: 100, resetsAt: null, windowDurationMins: 10080 },
+  ])
+  assert.equal(grouped.length, 2)
+  assert.equal(grouped[0]?.group, 'Gemini models')
+  assert.equal(grouped[0]?.windows.length, 2)
+  assert.equal(grouped[1]?.group, 'Claude & GPT models')
+  assert.equal(grouped[1]?.windows.length, 2)
 })

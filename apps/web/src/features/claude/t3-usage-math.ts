@@ -23,10 +23,40 @@ export type T3LimitWindowShape = {
   id: string
   kind: 'session' | 'weekly' | 'monthly' | 'other'
   label: string
+  group?: string | null
+  groupDetail?: string | null
   usedPercent: number
   remainingPercent: number
   resetsAt: string | null
   windowDurationMins: number | null
+}
+
+export type T3LimitWindowGroup<W extends T3LimitWindowShape = T3LimitWindowShape> = {
+  key: string
+  group: string | null
+  groupDetail: string | null
+  windows: W[]
+}
+
+export function groupLimitWindows<W extends T3LimitWindowShape>(windows: W[]): T3LimitWindowGroup<W>[] {
+  const groups: T3LimitWindowGroup<W>[] = []
+  for (const w of windows) {
+    const g = typeof w.group === 'string' && w.group.trim() ? w.group.trim() : null
+    const detail = typeof w.groupDetail === 'string' && w.groupDetail.trim() ? w.groupDetail.trim() : null
+    const prev = groups.at(-1)
+    if (prev && prev.group === g) {
+      if (!prev.groupDetail && detail) prev.groupDetail = detail
+      prev.windows.push(w)
+    } else {
+      groups.push({
+        key: `${g ?? 'default'}:${groups.length}`,
+        group: g,
+        groupDetail: detail,
+        windows: [w],
+      })
+    }
+  }
+  return groups
 }
 
 export type T3UsageBucketShape = {

@@ -1488,6 +1488,8 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
             id: string
             kind: 'session' | 'weekly' | 'monthly' | 'other'
             label: string
+            group?: string | null
+            groupDetail?: string | null
             usedPercent: number
             remainingPercent: number
             resetsAt: string | null

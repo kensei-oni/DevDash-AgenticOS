@@ -23,6 +23,7 @@ import {
   aggregateT3Usage,
   browserTimeZone,
   computeWindowPace,
+  groupLimitWindows,
   formatCompactTokens,
   formatInt,
   formatResetCountdown,
@@ -517,8 +518,27 @@ function LimitsSection({
                 </header>
 
                 <div className="flex flex-col gap-3.5">
-                  {acc.windows.map((w) => (
-                    <LimitWindowRow key={w.id} window={w} color={color} nowMs={nowMs} />
+                  {groupLimitWindows(acc.windows).map((grp, gi) => (
+                    <div
+                      key={grp.key}
+                      className={cn('flex flex-col gap-3', gi > 0 && 'border-t border-border/60 pt-3.5')}
+                    >
+                      {grp.group && (
+                        <div className="flex flex-col gap-0.5" title={grp.groupDetail ?? undefined}>
+                          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                            {grp.group}
+                          </span>
+                          {grp.groupDetail && (
+                            <span className="truncate text-[11px] text-muted-foreground/80">
+                              {grp.groupDetail}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {grp.windows.map((w) => (
+                        <LimitWindowRow key={w.id} window={w} color={color} nowMs={nowMs} />
+                      ))}
+                    </div>
                   ))}
                 </div>
 

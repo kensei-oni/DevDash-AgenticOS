@@ -10,6 +10,7 @@ import type { Socket } from 'node:net'
 import { promisify } from 'node:util'
 import { readConfig } from './t3-client.ts'
 import { assertMemberEndpoint, assertRegularMemberUid, memberAuthFetch, memberWsUpgrade, validateMemberUrl } from './t3-local.ts'
+import { clearAntigravityLimitsCache, getAntigravityUsageLimits } from './t3-antigravity-limits.ts'
 
 const execFileAsync = promisify(execFile)
 const DEFAULT_T3_BIN = '/opt/devdash/t3code/current/t3'
@@ -33,6 +34,8 @@ export type T3LimitWindow = {
   id: string
   kind: 'session' | 'weekly' | 'monthly' | 'other'
   label: string
+  group?: string | null
+  groupDetail?: string | null
   usedPercent: number
   remainingPercent: number
   resetsAt: string | null
@@ -750,6 +753,7 @@ export function closeUsageClient(): void {
   }
   liveConfig = null
   refreshInFlight = null
+  clearAntigravityLimitsCache()
   if (sharedConn) {
     sharedConn.close()
     sharedConn = null
@@ -821,12 +825,36 @@ function ensureLiveConfig(conn: T3RpcConnection): LiveConfigCache {
   return state
 }
 
+async function refreshAntigravityProviders(): Promise<void> {
+  let baseDir: string
+  try {
+    baseDir = memberPaths().baseDir
+  } catch {
+    return
+  }
+  const providers = liveConfig?.providers ?? []
+  const targets = providers.filter((p) => p.enabled !== false && String(p.driver ?? p.instanceId ?? '') === 'antigravity')
+  if (targets.length === 0) {
+    await getAntigravityUsageLimits({ baseDir, instanceId: 'antigravity', refresh: true }).catch(() => {})
+    return
+  }
+  await Promise.all(
+    targets.map((p) => {
+      const instanceId = String(p.instanceId ?? p.driver ?? 'antigravity')
+      const version = typeof p.version === 'string' ? p.version : null
+      return getAntigravityUsageLimits({ baseDir, instanceId, version, refresh: true }).catch(() => {})
+    }),
+  )
+}
+
 function startBackgroundLimitsRefresh(conn: T3RpcConnection): Promise<void> {
   if (refreshInFlight) return refreshInFlight
   lastRefreshAt = Date.now()
-  const p = conn.call('server.refreshProviders', { fresh: true }, 25_000)
+  const p = Promise.all([
+    conn.call('server.refreshProviders', { fresh: true }, 25_000).catch(() => {}),
+    refreshAntigravityProviders().catch(() => {}),
+  ])
     .then(() => {})
-    .catch(() => {})
     .finally(() => {
       if (refreshInFlight === p) refreshInFlight = null
       notifyUsageUpdated()
@@ -924,6 +952,8 @@ function normalizeWindow(raw: Record<string, unknown>): T3LimitWindow {
     id: String(raw.id ?? 'window'),
     kind,
     label: String(raw.label ?? 'Limit'),
+    ...(typeof raw.group === 'string' ? { group: raw.group } : {}),
+    ...(typeof raw.groupDetail === 'string' ? { groupDetail: raw.groupDetail } : {}),
     usedPercent: used,
     remainingPercent: Math.max(0, Math.min(100, 100 - used)),
     resetsAt: typeof raw.resetsAt === 'string' ? raw.resetsAt : null,
@@ -974,8 +1004,9 @@ function normalizeLimits(raw: Record<string, unknown> | undefined) {
 }
 
 export async function getUsageLimits(opts: { refresh?: boolean } = {}): Promise<T3LimitsResponse> {
+  let baseDir: string
   try {
-    memberPaths()
+    baseDir = memberPaths().baseDir
   } catch (err) {
     return {
       connected: false,
@@ -1009,12 +1040,29 @@ export async function getUsageLimits(opts: { refresh?: boolean } = {}): Promise<
       const installed = p.installed === true
       const lim = normalizeLimits(p.usageLimits as Record<string, unknown> | undefined)
 
-      // Skip unconfigured default-enabled providers (e.g. Claude when CLI isn't installed in T3 and not signed in).
-      if (!installed && auth.status !== 'authenticated' && (!lim || lim.windows.length === 0)) continue
+      // T3 Code does not yet probe Antigravity quota windows natively; query Antigravity's quota endpoint directly.
+      const agyLimits = driver === 'antigravity' && (!lim || lim.windows.length === 0)
+        ? await getAntigravityUsageLimits({
+            baseDir,
+            instanceId: instanceId || 'antigravity',
+            version: typeof p.version === 'string' ? p.version : null,
+            refresh: false,
+          }).catch(() => null)
+        : null
 
-      if (lim?.unavailable?.reason === 'probeFailed') {
-        notices.push(`${label}: ${lim.unavailable.message || 'Could not read rate limits.'}`)
+      const effectiveWindows = lim && lim.windows.length > 0 ? lim.windows : (agyLimits?.windows ?? [])
+      const effectiveUnavailable = lim?.unavailable ?? agyLimits?.unavailable ?? null
+
+      // Skip unconfigured default-enabled providers (e.g. Claude when CLI isn't installed in T3 and not signed in).
+      if (!installed && auth.status !== 'authenticated' && effectiveWindows.length === 0) continue
+
+      if (effectiveUnavailable?.reason === 'probeFailed') {
+        notices.push(`${label}: ${effectiveUnavailable.message || 'Could not read rate limits.'}`)
       }
+      const rawAuthLabel = typeof auth.label === 'string' ? auth.label : null
+      const effectivePlan = agyLimits?.plan ?? rawAuthLabel
+      const effectiveEmail = agyLimits?.email ?? (typeof auth.email === 'string' ? auth.email : null)
+
       accounts.push({
         id: `provider:${instanceId}`,
         instanceId,
@@ -1023,16 +1071,16 @@ export async function getUsageLimits(opts: { refresh?: boolean } = {}): Promise<
         displayName,
         accentColor: typeof p.accentColor === 'string' ? p.accentColor : null,
         status,
-        plan: typeof auth.label === 'string' ? auth.label : null,
-        email: typeof auth.email === 'string' ? auth.email : null,
+        plan: effectivePlan,
+        email: effectiveEmail,
         sourceLabel: null,
-        checkedAt: lim?.checkedAt ?? (typeof p.checkedAt === 'string' ? p.checkedAt : null),
-        windows: lim?.windows ?? [],
+        checkedAt: lim?.checkedAt ?? agyLimits?.checkedAt ?? (typeof p.checkedAt === 'string' ? p.checkedAt : null),
+        windows: effectiveWindows,
         zeroSpendCap: lim?.zeroSpendCap ?? false,
         resetCredits: lim?.resetCredits ?? null,
         resetCreditInput: lim?.resetCredits && lim.resetCredits.availableCount > 0 ? { instanceId } : null,
-        externalUsage: lim?.externalUsage ?? null,
-        unavailable: lim?.unavailable ?? null,
+        externalUsage: lim?.externalUsage ?? agyLimits?.externalUsage ?? null,
+        unavailable: effectiveUnavailable,
       })
     }
 
