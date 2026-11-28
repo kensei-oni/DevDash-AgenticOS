@@ -98,7 +98,7 @@ export function PlanUsage({
   working?: boolean
 }) {
   return (
-    <div className={cn('flex flex-col gap-4', className)}>
+    <div className={cn('flex min-w-0 flex-col gap-4', className)}>
       {sessionId && <SessionUsage id={sessionId} working={working} />}
       {harness === 't3code' ? (
         <div className="flex flex-col gap-3">
@@ -152,13 +152,13 @@ function T3SessionLimits({ model }: { model?: string | null }) {
         ? 'No subscription rate limits (billed per token).'
         : (acct?.unavailable?.message || 'No rate-limit windows reported for this model.')
     return (
-      <div className="flex flex-col gap-1.5 text-xs">
-        <span className="inline-flex min-w-0 items-center gap-1.5 font-medium">
+      <div className="flex min-w-0 flex-col gap-1.5 text-xs">
+        <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 font-medium">
           <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-          <span className="truncate">{name}</span>
-          {acct?.plan && <span className="truncate text-muted-foreground">· {acct.plan}</span>}
+          <span className="shrink-0">{name}</span>
+          {acct?.plan && <span className="min-w-0 truncate font-normal text-muted-foreground">· {acct.plan}</span>}
         </span>
-        <p className="text-muted-foreground">{msg}</p>
+        <p className="break-words text-muted-foreground">{msg}</p>
       </div>
     )
   }
@@ -175,7 +175,7 @@ function T3SessionLimits({ model }: { model?: string | null }) {
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-w-0 flex-col gap-4">
       {q.data.refreshing && (
         <div className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
           <RotateCw className="size-3 animate-spin" />
@@ -187,13 +187,13 @@ function T3SessionLimits({ model }: { model?: string | null }) {
         const groups = poolLabel ? null : groupLimitWindows(windows)
         const showGroups = !poolLabel && groups !== null && (groups.length > 1 || (groups.length === 1 && groups[0]!.group !== null))
         return (
-          <div key={acct.id} className="flex flex-col gap-2.5">
-            <div className="flex flex-col gap-0.5">
-              <div className="flex items-center justify-between gap-2 text-xs">
-                <span className="inline-flex min-w-0 items-center gap-1.5 font-medium">
+          <div key={acct.id} className="flex min-w-0 flex-col gap-2.5">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <div className="flex min-w-0 items-center justify-between gap-2 text-xs">
+                <span className="inline-flex min-w-0 flex-1 items-center gap-1.5 font-medium">
                   <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-                  <span className="truncate">{acct.displayName || acct.label || providerLabel(acct.driver)}</span>
-                  {acct.plan && <span className="truncate text-muted-foreground">· {acct.plan}</span>}
+                  <span className="shrink-0">{acct.displayName || acct.label || providerLabel(acct.driver)}</span>
+                  {acct.plan && <span className="min-w-0 truncate font-normal text-muted-foreground">· {acct.plan}</span>}
                 </span>
                 {acct.resetCredits && acct.resetCredits.availableCount > 0 && (
                   <Link to="/usage" search={{ tab: 'limits' }} className="shrink-0 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground hover:text-foreground">
@@ -202,7 +202,7 @@ function T3SessionLimits({ model }: { model?: string | null }) {
                 )}
               </div>
               {poolLabel && (
-                <span className="pl-3.5 text-[11px] text-muted-foreground">{poolLabel}</span>
+                <span className="truncate pl-3.5 text-[11px] text-muted-foreground">{poolLabel}</span>
               )}
             </div>
             {showGroups ? (

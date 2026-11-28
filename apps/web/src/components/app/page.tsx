@@ -49,7 +49,7 @@ export function PageHeader({ title, description, back, backOnSmall, actions, wid
 
 /** Standard content column under a PageHeader. */
 export function PageBody({ children, width = 'default', className }: { children: ReactNode; width?: PageWidth; className?: string }) {
-  return <div style={col(width)} className={cn('page-col flex w-full flex-col gap-6 py-6', className)}>{children}</div>
+  return <div style={col(width)} className={cn('page-col flex min-w-0 w-full flex-col gap-6 py-6', className)}>{children}</div>
 }
 
 /** A settings group: what it is on the left (wide screens), its controls on the right; stacked on phones. */

@@ -169,6 +169,8 @@ export function T3UsagePage() {
     <>
       <PageHeader
         title="Usage"
+        back="/more"
+        backOnSmall
         actions={
           <div className="flex items-center gap-1 sm:gap-1.5">
             {tab === 'limits' ? (
@@ -219,8 +221,8 @@ export function T3UsagePage() {
         }
       />
 
-      <PageBody className="gap-5 py-4 sm:gap-8 sm:py-6 md:py-8">
-        <div className="flex flex-col gap-3 sm:gap-4">
+      <PageBody className="gap-5 overflow-x-clip py-4 sm:gap-8 sm:py-6 md:py-8">
+        <div className="flex min-w-0 flex-col gap-3 sm:gap-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm text-muted-foreground">
               <span className="inline-flex items-center gap-1.5 rounded-full bg-surface px-2.5 py-0.5 text-xs font-medium text-foreground">
@@ -248,22 +250,22 @@ export function T3UsagePage() {
             </div>
           </div>
 
-          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-3">
+          <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-3">
             <ToggleGroup
               type="single"
               spacing={1}
               value={tab}
               onValueChange={(v) => v && setSearch({ tab: v as T3UsageMetric })}
               aria-label="Usage section"
-              className="w-full rounded-full bg-surface p-1 sm:w-fit"
+              className="w-full min-w-0 rounded-full bg-surface p-1 sm:w-fit"
             >
-              <ToggleGroupItem value="limits" className="h-8 flex-1 rounded-full px-3 text-xs hover:bg-surface-2 sm:h-7 sm:flex-initial sm:px-4 sm:text-sm">
+              <ToggleGroupItem value="limits" className="h-8 min-w-0 flex-1 rounded-full px-2.5 text-xs hover:bg-surface-2 sm:h-7 sm:min-w-fit sm:flex-initial sm:px-4 sm:text-sm">
                 Limits
               </ToggleGroupItem>
-              <ToggleGroupItem value="tokens" className="h-8 flex-1 rounded-full px-3 text-xs hover:bg-surface-2 sm:h-7 sm:flex-initial sm:px-4 sm:text-sm">
+              <ToggleGroupItem value="tokens" className="h-8 min-w-0 flex-1 rounded-full px-2.5 text-xs hover:bg-surface-2 sm:h-7 sm:min-w-fit sm:flex-initial sm:px-4 sm:text-sm">
                 Tokens
               </ToggleGroupItem>
-              <ToggleGroupItem value="price" className="h-8 flex-1 rounded-full px-3 text-xs hover:bg-surface-2 sm:h-7 sm:flex-initial sm:px-4 sm:text-sm">
+              <ToggleGroupItem value="price" className="h-8 min-w-0 flex-1 rounded-full px-2.5 text-xs hover:bg-surface-2 sm:h-7 sm:min-w-fit sm:flex-initial sm:px-4 sm:text-sm">
                 Price
               </ToggleGroupItem>
             </ToggleGroup>
@@ -275,13 +277,13 @@ export function T3UsagePage() {
                 value={period}
                 onValueChange={(v) => v && setSearch({ period: v as T3UsagePeriod })}
                 aria-label="Usage time window"
-                className="w-full rounded-full bg-surface p-1 sm:w-fit"
+                className="w-full min-w-0 rounded-full bg-surface p-1 sm:w-fit"
               >
                 {(['day', 'week', 'month', 'quarter'] as const).map((p) => (
                   <ToggleGroupItem
                     key={p}
                     value={p}
-                    className="h-8 flex-1 rounded-full px-2.5 text-xs tabular-nums hover:bg-surface-2 sm:h-7 sm:flex-initial sm:px-3.5 sm:text-sm"
+                    className="h-8 min-w-0 flex-1 rounded-full px-2 text-xs tabular-nums hover:bg-surface-2 sm:h-7 sm:min-w-fit sm:flex-initial sm:px-3.5 sm:text-sm"
                   >
                     {PERIOD_LABELS[p]}
                   </ToggleGroupItem>
@@ -292,7 +294,7 @@ export function T3UsagePage() {
 
           {tab !== 'limits' && agg.allProviders.length > 1 && (
             <div
-              className="-mx-4 flex items-center gap-1.5 overflow-x-auto px-4 py-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0"
+              className="-mx-4 flex max-w-[calc(100%+2rem)] items-center gap-1.5 overflow-x-auto px-4 py-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:mx-0 sm:max-w-none sm:flex-wrap sm:overflow-visible sm:px-0"
               role="group"
               aria-label="Filter T3 Code providers"
             >
@@ -328,7 +330,7 @@ export function T3UsagePage() {
         </div>
 
         {!activeConnected ? (
-          <div className="flex flex-col items-start gap-4 rounded-2xl bg-surface p-5 sm:p-6 md:p-8">
+          <div className="flex min-w-0 flex-col items-start gap-4 rounded-2xl bg-surface p-5 sm:p-6 md:p-8">
             <div className="flex max-w-prose flex-col gap-1.5">
               <h2 className="text-base sm:text-lg font-semibold tracking-[-0.015em]">Connect T3 Code to view usage</h2>
               <p className="text-sm text-pretty text-muted-foreground">
@@ -472,35 +474,35 @@ function LimitsSection({
   }
 
   return (
-    <div className="flex flex-col gap-5 sm:gap-6">
+    <div className="flex min-w-0 flex-col gap-5 sm:gap-6">
       {withWindows.length > 0 && (
-        <div className="grid gap-3.5 sm:gap-4 lg:grid-cols-2">
+        <div className="grid min-w-0 grid-cols-1 gap-3.5 sm:gap-4 lg:grid-cols-2">
           {withWindows.map((acc) => {
             const color = providerColor(acc.driver, acc.accentColor)
             const checkedAge = formatLiveAge(acc.checkedAt, nowMs)
             return (
-              <section key={acc.id} className="flex flex-col gap-3.5 sm:gap-4 rounded-2xl bg-surface p-4 md:p-5">
-                <header className="flex flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
-                  <div className="flex min-w-0 items-center gap-2.5">
-                    <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+              <section key={acc.id} className="flex min-w-0 flex-col gap-3.5 overflow-hidden rounded-2xl bg-surface p-3.5 sm:gap-4 sm:p-4 md:p-5">
+                <header className="flex min-w-0 flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
+                  <div className="flex min-w-0 items-start gap-2.5 sm:items-center">
+                    <span className="mt-1.5 size-2.5 shrink-0 rounded-full sm:mt-0" style={{ backgroundColor: color }} />
                     <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+                      <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:gap-2">
                         <h2 className="truncate font-semibold tracking-[-0.01em]">{acc.label}</h2>
                         {acc.sourceLabel && (
-                          <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-muted-foreground">
+                          <span className="max-w-full truncate rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-muted-foreground">
                             {acc.sourceLabel}
                           </span>
                         )}
                       </div>
                       {(acc.plan || acc.email) && (
-                        <p className="truncate text-xs text-muted-foreground">
+                        <p className="line-clamp-2 break-words text-xs text-muted-foreground sm:block sm:truncate">
                           {[acc.plan, acc.email].filter(Boolean).join(' · ')}
                         </p>
                       )}
                     </div>
                   </div>
                   {(checkedAge || acc.externalUsage) && (
-                    <div className="flex flex-wrap items-center gap-2 pl-5 text-xs tabular-nums text-muted-foreground sm:shrink-0 sm:pl-0">
+                    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 pl-5 text-xs tabular-nums text-muted-foreground sm:shrink-0 sm:pl-0">
                       {checkedAge && <span>Checked {checkedAge}</span>}
                       {acc.externalUsage && (
                         <a
@@ -517,19 +519,19 @@ function LimitsSection({
                   )}
                 </header>
 
-                <div className="flex flex-col gap-3.5">
+                <div className="flex min-w-0 flex-col gap-3.5">
                   {groupLimitWindows(acc.windows).map((grp, gi) => (
                     <div
                       key={grp.key}
-                      className={cn('flex flex-col gap-3', gi > 0 && 'border-t border-border/60 pt-3.5')}
+                      className={cn('flex min-w-0 flex-col gap-3', gi > 0 && 'border-t border-border/60 pt-3.5')}
                     >
                       {grp.group && (
-                        <div className="flex flex-col gap-0.5" title={grp.groupDetail ?? undefined}>
-                          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        <div className="flex min-w-0 flex-col gap-0.5" title={grp.groupDetail ?? undefined}>
+                          <span className="truncate text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                             {grp.group}
                           </span>
                           {grp.groupDetail && (
-                            <span className="truncate text-[11px] text-muted-foreground/80">
+                            <span className="line-clamp-2 break-words text-[11px] leading-snug text-muted-foreground/80 sm:block sm:truncate">
                               {grp.groupDetail}
                             </span>
                           )}
@@ -543,8 +545,8 @@ function LimitsSection({
                 </div>
 
                 {acc.resetCredits && acc.resetCredits.availableCount > 0 && (
-                  <div className="flex flex-col gap-2 border-t pt-3 text-xs text-muted-foreground sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-                    <span className="tabular-nums">
+                  <div className="flex min-w-0 flex-col gap-2 border-t pt-3 text-xs text-muted-foreground sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+                    <span className="min-w-0 break-words tabular-nums">
                       {acc.resetCredits.availableCount} reset credit{acc.resetCredits.availableCount === 1 ? '' : 's'} banked
                       {acc.resetCredits.nextExpiresAt
                         ? ` · expires ${formatResetCountdown(acc.resetCredits.nextExpiresAt, nowMs)?.replace(/^Resets /, '') ?? ''}`
@@ -586,11 +588,11 @@ function LimitsSection({
       )}
 
       {withoutWindows.length > 0 && (
-        <section className="flex flex-col gap-2.5">
+        <section className="flex min-w-0 flex-col gap-2.5">
           <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Other connected T3 providers</h3>
-          <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid min-w-0 grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
             {withoutWindows.map((acc) => (
-              <div key={acc.id} className="flex items-start gap-2.5 rounded-2xl bg-surface px-4 py-3 text-sm">
+              <div key={acc.id} className="flex min-w-0 items-start gap-2.5 rounded-2xl bg-surface px-4 py-3 text-sm">
                 <StatusLight state={acc.status === 'ready' ? 'live' : 'idle'} className="mt-1 shrink-0" />
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-medium">{acc.label}</div>
@@ -608,11 +610,11 @@ function LimitsSection({
       )}
 
       {notices.length > 0 && (
-        <div className="flex flex-col gap-1 rounded-2xl bg-surface px-4 py-3 text-xs text-muted-foreground">
+        <div className="flex min-w-0 flex-col gap-1 rounded-2xl bg-surface px-4 py-3 text-xs text-muted-foreground">
           {notices.map((n) => (
-            <div key={n} className="flex items-center gap-2">
-              <AlertTriangle className="size-3.5 shrink-0 text-attention" />
-              <span>{n}</span>
+            <div key={n} className="flex min-w-0 items-start gap-2">
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-attention" />
+              <span className="min-w-0 break-words">{n}</span>
             </div>
           ))}
         </div>
@@ -645,12 +647,12 @@ export function LimitWindowRow({
   ].filter(Boolean).join(' · ')
 
   return (
-    <div className="flex flex-col gap-1.5" title={tooltip}>
-      <div className="flex items-baseline justify-between gap-2 text-xs">
-        <span className="truncate font-medium text-foreground">{w.label}</span>
+    <div className="flex min-w-0 flex-col gap-1.5" title={tooltip}>
+      <div className="flex min-w-0 items-baseline justify-between gap-2 text-xs">
+        <span className="min-w-0 truncate font-medium text-foreground">{w.label}</span>
         <span className="shrink-0 tabular-nums text-muted-foreground">
           <span className="font-semibold text-foreground">{remaining}% left</span>
-          {!compact && <span className="hidden xs:inline sm:inline ml-1.5 text-[11px]">({used}% used)</span>}
+          {!compact && <span className="ml-1.5 hidden text-[11px] sm:inline">({used}% used)</span>}
         </span>
       </div>
       <div
@@ -719,8 +721,8 @@ function TokensSection({
   const modelsByTokens = [...agg.models].sort((a, b) => b.totalTokens - a.totalTokens || b.costUsd - a.costUsd)
 
   return (
-    <div className="flex flex-col gap-5 sm:gap-8">
-      <div className="grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
+    <div className="flex min-w-0 flex-col gap-5 sm:gap-8">
+      <div className="grid min-w-0 grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
         <MetricCard
           label="Processed tokens"
           value={formatCompactTokens(agg.totalTokens)}
@@ -743,9 +745,9 @@ function TokensSection({
         />
       </div>
 
-      <section className="flex flex-col gap-3 rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <div>
+      <section className="flex min-w-0 flex-col gap-3 overflow-hidden rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
+        <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-2">
+          <div className="min-w-0">
             <h2 className="text-sm sm:text-base font-semibold tracking-[-0.01em]">
               {resolution === 'hour' ? 'Hourly processed tokens' : 'Daily processed tokens'}
             </h2>
@@ -761,8 +763,8 @@ function TokensSection({
         />
       </section>
 
-      <div className="grid gap-3.5 sm:gap-4 lg:grid-cols-2">
-        <section className="flex flex-col gap-3 rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
+      <div className="grid min-w-0 grid-cols-1 gap-3.5 sm:gap-4 lg:grid-cols-2">
+        <section className="flex min-w-0 flex-col gap-3 overflow-hidden rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
           <h2 className="text-sm sm:text-base font-semibold tracking-[-0.01em]">Tokens by type</h2>
           <dl className="flex flex-col gap-2.5 text-sm">
             <BreakdownRow label="Cached input" value={formatCompactTokens(agg.cachedInputTokens)} detail={formatInt(agg.cachedInputTokens)} share={agg.totalTokens > 0 ? agg.cachedInputTokens / agg.totalTokens : 0} />
@@ -812,8 +814,8 @@ function PriceSection({
   const hasSpeedBreakdown = agg.speedCost.fast > 0 || agg.speedCost.ultrafast > 0 || agg.speedCost.premium > 0
 
   return (
-    <div className="flex flex-col gap-5 sm:gap-8">
-      <div className="grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
+    <div className="flex min-w-0 flex-col gap-5 sm:gap-8">
+      <div className="grid min-w-0 grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
         <MetricCard
           label="Estimated cost"
           value={formatUsd(agg.costUsd)}
@@ -839,9 +841,9 @@ function PriceSection({
         />
       </div>
 
-      <section className="flex flex-col gap-3 rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <div>
+      <section className="flex min-w-0 flex-col gap-3 overflow-hidden rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
+        <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-2">
+          <div className="min-w-0">
             <h2 className="text-sm sm:text-base font-semibold tracking-[-0.01em]">
               {resolution === 'hour' ? 'Hourly cost' : 'Daily cost'}
             </h2>
@@ -857,8 +859,8 @@ function PriceSection({
         />
       </section>
 
-      <div className="grid gap-3.5 sm:gap-4 lg:grid-cols-2">
-        <section className="flex flex-col gap-3 rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
+      <div className="grid min-w-0 grid-cols-1 gap-3.5 sm:gap-4 lg:grid-cols-2">
+        <section className="flex min-w-0 flex-col gap-3 overflow-hidden rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
           <h2 className="text-sm sm:text-base font-semibold tracking-[-0.01em]">Cost by token type</h2>
           <dl className="flex flex-col gap-2.5 text-sm">
             <BreakdownRow label="Uncached input" value={formatUsd(agg.categoryCost.input)} share={agg.costUsd > 0 ? agg.categoryCost.input / agg.costUsd : 0} />
@@ -908,7 +910,7 @@ function MetricCard({
         <span className="truncate text-[11px] sm:text-xs font-medium text-muted-foreground">{label}</span>
         {action}
       </div>
-      <div className="truncate text-xl sm:text-2xl font-semibold tracking-[-0.02em] tabular-nums">{value}</div>
+      <div className="truncate text-lg sm:text-2xl font-semibold tracking-[-0.02em] tabular-nums">{value}</div>
       {sub && <div className="line-clamp-2 text-[11px] sm:text-xs leading-snug text-muted-foreground tabular-nums">{sub}</div>}
     </div>
   )
@@ -926,9 +928,9 @@ function BreakdownRow({
   share?: number
 }) {
   return (
-    <div className="flex items-baseline justify-between gap-3">
-      <dt className="truncate text-muted-foreground">{label}</dt>
-      <dd className="flex shrink-0 items-baseline gap-2 tabular-nums">
+    <div className="flex min-w-0 items-baseline justify-between gap-2 sm:gap-3">
+      <dt className="min-w-0 truncate text-muted-foreground">{label}</dt>
+      <dd className="flex shrink-0 items-baseline gap-1.5 sm:gap-2 tabular-nums">
         {detail && <span className="hidden text-xs text-muted-foreground sm:inline">{detail}</span>}
         {share !== undefined && share > 0 && <span className="text-xs text-muted-foreground">{formatShare(share)}</span>}
         <span className="font-medium text-foreground">{value}</span>
@@ -945,18 +947,18 @@ function ProviderSharePanel({
   providers: ReturnType<typeof aggregateT3Usage>['providers']
 }) {
   return (
-    <section className="flex flex-col gap-3 rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
+    <section className="flex min-w-0 flex-col gap-3 overflow-hidden rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
       <h2 className="text-sm sm:text-base font-semibold tracking-[-0.01em]">By provider</h2>
       {providers.length === 0 ? (
         <p className="py-4 text-sm text-muted-foreground">No provider activity in this time window.</p>
       ) : (
-        <ul className="flex flex-col gap-3">
+        <ul className="flex min-w-0 flex-col gap-3">
           {providers.map((p) => {
             const share = mode === 'price' ? p.costShare : p.tokenShare
             const color = providerColor(p.provider)
             return (
-              <li key={p.provider} className="flex flex-col gap-1.5">
-                <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-sm">
+              <li key={p.provider} className="flex min-w-0 flex-col gap-1.5">
+                <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-sm">
                   <span className="flex min-w-0 items-center gap-2 font-medium">
                     <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: color }} />
                     <span className="truncate">{providerLabel(p.provider)}</span>
@@ -1048,10 +1050,10 @@ function UsageChart({
   const firstLabel = series[0]?.label ?? ''
   const midLabel = series[Math.floor(series.length / 2)]?.label ?? ''
   const lastLabel = series[series.length - 1]?.label ?? ''
-  const gapClass = series.length > 45 ? 'gap-px' : series.length > 24 ? 'gap-[2px]' : 'gap-1'
+  const gapClass = series.length > 45 ? 'gap-0 sm:gap-px' : series.length > 24 ? 'gap-px sm:gap-[2px]' : 'gap-0.5 sm:gap-1'
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex min-w-0 flex-col gap-2">
       <div className="flex min-h-9 sm:min-h-6 flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs tabular-nums">
         {activePoint ? (
           <>
@@ -1093,7 +1095,7 @@ function UsageChart({
         onPointerMove={handlePointerMove}
         onPointerLeave={handlePointerLeave}
         className={cn(
-          'flex h-36 sm:h-44 touch-pan-y select-none items-end rounded-xl bg-background/50 px-2 pt-3 pb-1',
+          'flex h-36 min-w-0 overflow-hidden sm:h-44 touch-pan-y select-none items-end rounded-xl bg-background/50 px-1.5 sm:px-2 pt-3 pb-1',
           gapClass,
         )}
       >
@@ -1138,10 +1140,10 @@ function UsageChart({
         })}
       </div>
 
-      <div className="flex items-center justify-between px-1 text-[11px] tabular-nums text-muted-foreground">
-        <span>{firstLabel}</span>
-        <span>{midLabel}</span>
-        <span>{lastLabel}</span>
+      <div className="flex min-w-0 items-center justify-between gap-2 px-1 text-[10px] sm:text-[11px] tabular-nums text-muted-foreground">
+        <span className="truncate">{firstLabel}</span>
+        <span className="truncate">{midLabel}</span>
+        <span className="truncate">{lastLabel}</span>
       </div>
     </div>
   )
@@ -1163,7 +1165,7 @@ function ModelsBreakdownTable({
   )
 
   return (
-    <section className="flex flex-col gap-3 rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
+    <section className="flex min-w-0 flex-col gap-3 overflow-hidden rounded-2xl bg-surface p-3.5 sm:p-4 md:p-5">
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-sm sm:text-base font-semibold tracking-[-0.01em]">Models breakdown</h2>
         <span className="text-xs text-muted-foreground tabular-nums">
@@ -1175,7 +1177,7 @@ function ModelsBreakdownTable({
         <p className="py-6 text-center text-sm text-muted-foreground">No model activity in this window.</p>
       ) : (
         <>
-          <div className="flex flex-col divide-y divide-border/50 md:hidden">
+          <div className="flex min-w-0 flex-col divide-y divide-border/50 md:hidden">
             {models.map((m, idx) => {
               const open = expandedKey === m.key
               const metricVal = mode === 'price' ? m.costUsd : m.totalTokens
@@ -1186,18 +1188,18 @@ function ModelsBreakdownTable({
               const modelCacheHit = inputTotal > 0 ? m.tokens.cachedInputTokens / inputTotal : 0
 
               return (
-                <div key={m.key} className="flex flex-col gap-2 py-3 first:pt-1 last:pb-1">
-                  <div className="flex items-start justify-between gap-2.5">
+                <div key={m.key} className="flex min-w-0 flex-col gap-2 py-3 first:pt-1 last:pb-1">
+                  <div className="flex min-w-0 items-start justify-between gap-2">
                     <button
                       type="button"
                       onClick={() => setExpandedKey(open ? null : m.key)}
-                      className="flex min-w-0 flex-1 items-start gap-2 text-left"
+                      className="flex min-w-0 flex-1 items-start gap-2 overflow-hidden text-left"
                     >
-                      <span className="mt-0.5 text-xs tabular-nums text-muted-foreground">{idx + 1}.</span>
+                      <span className="mt-0.5 shrink-0 text-xs tabular-nums text-muted-foreground">{idx + 1}.</span>
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex min-w-0 items-center gap-1.5">
                           <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-                          <span className="truncate font-mono text-xs font-medium text-foreground">{m.model}</span>
+                          <span className="min-w-0 truncate font-mono text-xs font-medium text-foreground">{m.model}</span>
                           {open
                             ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
                             : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />}
@@ -1436,9 +1438,9 @@ function WarningsFooter({ warnings }: { warnings: string[] }) {
   return (
     <div className="flex flex-col gap-1 rounded-2xl bg-surface px-4 py-3 text-xs text-muted-foreground">
       {warnings.map((w) => (
-        <div key={w} className="flex items-center gap-2">
-          <AlertTriangle className="size-3.5 shrink-0 text-attention" />
-          <span>{w}</span>
+        <div key={w} className="flex min-w-0 items-start gap-2">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-attention" />
+          <span className="min-w-0 break-words">{w}</span>
         </div>
       ))}
     </div>
@@ -1590,7 +1592,7 @@ function ModelPricesDialog({
       title="T3 Code model prices"
       description="Override per-1M-token USD prices or map custom model IDs to catalog models in your T3 Code settings."
     >
-      <div className="flex flex-col gap-4 sm:gap-5 pb-2 text-sm">
+      <div className="flex min-w-0 flex-col gap-4 sm:gap-5 pb-2 text-sm">
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-surface px-3.5 py-2.5 text-xs">
           <span className="text-muted-foreground">
             Catalog: <span className="font-medium text-foreground">{formatInt(pricing.knownModels)} models</span> ({pricing.status})
@@ -1616,7 +1618,7 @@ function ModelPricesDialog({
                   type="button"
                   onClick={() => selectModel(m.model)}
                   className={cn(
-                    'rounded-full px-2.5 py-1 font-mono text-xs transition-colors',
+                    'max-w-full truncate rounded-full px-2.5 py-1 font-mono text-xs transition-colors',
                     modelName === m.model ? 'bg-foreground text-background' : 'bg-surface hover:bg-surface-2',
                   )}
                 >
@@ -1661,7 +1663,7 @@ function ModelPricesDialog({
           </ToggleGroup>
 
           {mode === 'rate' ? (
-            <div className="grid grid-cols-2 gap-2.5">
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
               <Field>
                 <FieldLabel htmlFor="t3-rate-in">Input ($ / 1M)</FieldLabel>
                 <Input id="t3-rate-in" type="number" inputMode="decimal" step="any" min="0" placeholder="2.50" value={inputRate} onChange={(e) => setInputRate(e.target.value)} className="h-10 sm:h-8" />

@@ -153,7 +153,7 @@ function PageMotion({ children }: { children: ReactNode }) {
     if (!mounted.current || /^\/(sessions\/[0-9a-f-]{36}|terminal)/.test(path)) return
     gsap.fromTo(ref.current, { opacity: 0, y: 4 }, { opacity: 1, y: 0, duration: 0.18, ease: 'power2.out', clearProps: 'opacity,transform' })
   }, [section])
-  return <div ref={ref} className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+  return <div ref={ref} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">{children}</div>
 }
 
 /** The sidebar's edge: drag to resize (remembered on this device), click to collapse to icons. */
@@ -321,7 +321,7 @@ function MobileTabs({ waiting }: { waiting: number }) {
   // Inside a Claude chat the tabs step aside, as in messaging apps: the back arrow leads out.
   const inChat = useRouterState({ select: (s) => /^\/sessions\/[0-9a-f-]{36}$/.test(s.location.pathname) })
   if (inChat) return null
-  const moreActive = ['/more', '/subagents', '/autopilot', '/members', '/account', '/notes', '/tools', '/terminal', '/services', '/files', '/vault', '/network', '/pc', '/storage', '/browser', '/server'].some((p) => active(p)) || active('/sessions/setup')
+  const moreActive = ['/more', '/usage', '/approvals', '/subagents', '/autopilot', '/members', '/account', '/notes', '/tools', '/terminal', '/services', '/files', '/vault', '/network', '/pc', '/storage', '/browser', '/server', '/skills', '/mcps'].some((p) => active(p)) || active('/sessions/setup')
   return (
     <nav aria-label="Sections" className="grid shrink-0 grid-cols-5 border-t bg-background pb-[env(safe-area-inset-bottom)] md:hidden [.keyboard-open_&]:hidden">
       {TABS.map((t) => {
