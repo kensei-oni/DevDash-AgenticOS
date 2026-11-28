@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { T3Client, T3RequestError } from './t3-client.ts'
 import { connectedCapabilities, nativeVariants, effortOption, selection, modelId, type Capabilities } from './t3code.ts'
 import { disposeSupervisorWorkers } from './t3-supervisor.ts'
+import { readT3ThreadUsage } from './t3-thread-usage.ts'
 
 type Selection = { model: string; instanceId: string; options?: { id: string; value: string | boolean }[] }
 type Item = { itemId: string; messageId?: string | null; position: number; runId: string | null; type: string; createdBy: string | null; text: string | null; title: string | null; status: string; textTruncated?: boolean; nextTextOffset?: number | null; [key: string]: unknown }
@@ -37,15 +38,33 @@ let lastPosition = -1
 let stopped = false
 let closing = false
 let promptDone: Promise<unknown> | undefined
+let pendingSelection: Selection | undefined
 let effort = 'default'
 let mode = process.env.DEVDASH_T3_PERMISSION_MODE ?? 'default'
+let lastEmittedUsageKey = ''
 const update = (u: Record<string, unknown>) => send({ method: 'session/update', params: { sessionId: thread?.threadId, update: u } })
 const desiredModes = () => ({ runtimeMode: 'full-access', interactionMode: 'default' })
 const activeRun = (data: Read) => data.thread.activeRunId ?? data.recentRuns.find((r) => !terminal.has(r.status))?.runId
 const busyThread = (data: Read) => !!activeRun(data) || ['preparing', 'queued', 'starting', 'running', 'waiting'].includes(data.thread.status)
 const limit = (name: string, fallback: number, min: number, max: number) => { const n = Number(process.env[name]); return Number.isFinite(n) && n >= min ? Math.min(n, max) : fallback }
 const turnLimitMs = limit('DEVDASH_T3_TURN_TIMEOUT_MS', 30 * 60_000, 100, 30 * 60_000)
-function currentModel() { return caps.providers.find((p) => p.providerInstanceId === thread?.providerInstanceId)?.models.find((m) => m.id === thread?.model) }
+function effectiveInstanceId() { return pendingSelection?.instanceId ?? thread?.providerInstanceId }
+function effectiveModelSlug() { return pendingSelection?.model ?? thread?.model }
+function currentModel() { return caps.providers.find((p) => p.providerInstanceId === effectiveInstanceId())?.models.find((m) => m.id === effectiveModelSlug()) }
+function emitLiveThreadUsage(force = false) {
+  if (!thread?.threadId) return null
+  const snap = readT3ThreadUsage(thread.threadId)
+  const key = JSON.stringify([snap.usage.cost.toFixed(6), snap.context?.usedTokens ?? 0, snap.context?.maxTokens ?? 0])
+  if ((force || key !== lastEmittedUsageKey) && (snap.usage.turns > 0 || snap.context)) {
+    lastEmittedUsageKey = key
+    update({
+      sessionUpdate: 'usage_update',
+      cost: { amount: snap.usage.cost, currency: 'USD' },
+      ...(snap.context ? { used: snap.context.usedTokens, size: snap.context.maxTokens } : {}),
+    })
+  }
+  return snap
+}
 /** A project's default or a resumed model may be outside T3's short list. Search its exact ID when necessary. */
 async function findModel(picked: Selection) {
   const provider = caps.providers.find((p) => p.providerInstanceId === picked.instanceId)
@@ -79,8 +98,10 @@ async function withEffort(picked: Selection, level: string | null): Promise<Sele
   return { instanceId: picked.instanceId, model: picked.model, ...(options.length ? { options } : {}) }
 }
 function configOptions() {
+  const inst = effectiveInstanceId()
+  const mod = effectiveModelSlug()
   return [
-    { id: 'model', category: 'model', currentValue: thread ? modelId(thread.providerInstanceId, thread.model) : '', options: caps.providers.flatMap((p) => p.models.map((m) => ({ value: modelId(p.providerInstanceId, m.id), name: `${p.displayName ?? p.providerInstanceId}: ${m.label ?? m.id}` }))) },
+    { id: 'model', category: 'model', currentValue: inst && mod ? modelId(inst, mod) : '', options: caps.providers.flatMap((p) => p.models.map((m) => ({ value: modelId(p.providerInstanceId, m.id), name: `${p.displayName ?? p.providerInstanceId}: ${m.label ?? m.id}` }))) },
     { id: 'effort', category: 'thought_level', currentValue: effort, options: [{ value: 'default', name: 'Default' }, ...(effortOption(currentModel())?.levels ?? []).map((value) => ({ value, name: value }))] },
   ]
 }
@@ -167,18 +188,36 @@ async function checkWorkspace(cwd: string) {
   const project = await client.call<{ workspaceRoot: string }>('t3_project_read', { projectId: thread!.projectId })
   if (realpathSync(thread!.worktreePath ?? project.workspaceRoot) !== realpathSync(cwd)) throw new Error('The T3 Code conversation belongs to a different folder.')
 }
-/** Validate the whole selection before T3 changes anything; committing model then effort can leave the two apps apart. */
+async function flushPendingSelection() {
+  if (!pendingSelection || !thread) return
+  const target = pendingSelection
+  await client.call('t3_thread_configure', { threadId: thread.threadId, modelSelection: target })
+  if (pendingSelection === target) {
+    pendingSelection = undefined
+    thread = { ...thread, providerInstanceId: target.instanceId, model: target.model }
+  }
+}
+/** Validate the whole selection before T3 changes anything; if a turn is actively running, apply immediately when supported or queue for turn completion. */
 async function setSelection(model: string | null, requestedEffort: string | null) {
-  if (running || unresolvedSend || activePrompt) throw new Error('Wait for T3 Code to finish before changing its model or effort.')
-  const [freshCaps, current] = await Promise.all([connectedCapabilities(client), readSelection()])
+  const [freshCaps, current] = await Promise.all([connectedCapabilities(client), pendingSelection ? Promise.resolve(pendingSelection) : readSelection()])
   caps = freshCaps
   // Keep unrelated options such as service tier when only the reasoning level changes.
   const picked = !model || model === modelId(current.instanceId, current.model) ? current : selection(model)
   const modelSelection = await withEffort(picked, requestedEffort)
-  if (busyThread(await readThread())) throw new Error('T3 Code is already running this conversation. Wait for it to finish before changing its model or effort.')
-  await client.call('t3_thread_configure', { threadId: thread!.threadId, modelSelection })
+  const sameInstance = picked.instanceId === (thread?.providerInstanceId ?? current.instanceId)
+  if (!unresolvedSend && ((!running && !activePrompt && !busyThread(await readThread())) || sameInstance)) {
+    try {
+      await client.call('t3_thread_configure', { threadId: thread!.threadId, modelSelection })
+      pendingSelection = undefined
+      effort = requestedEffort ?? 'default'
+      thread = { ...thread!, providerInstanceId: picked.instanceId, model: picked.model }
+      return { configOptions: configOptions() }
+    } catch (err) {
+      if (!(running || activePrompt) || !/busy|running|active/i.test((err as Error).message)) throw err
+    }
+  }
+  pendingSelection = modelSelection
   effort = requestedEffort ?? 'default'
-  thread = { ...thread!, providerInstanceId: picked.instanceId, model: picked.model }
   return { configOptions: configOptions() }
 }
 function decodedIds(item: Item): string[] {
@@ -366,6 +405,7 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
         if (busyThread(before)) throw new Error('This conversation is already running in T3 Code. Wait for it to finish or stop it there before sending another message.')
       }
       if (stopped || closing) return { stopReason: 'cancelled' }
+      if (pendingSelection) await flushPendingSelection()
       const afterPosition = lastPosition
       const requestId = randomUUID()
       const text = prompt.map((b) => b.text ?? '').join('\n')
@@ -415,6 +455,7 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
       let interval = 120
       let previous = ''
       let lastRunError = ''
+      let lastUsagePollAt = 0
       try {
         if (result.delivery === 'queued') {
           await stopOwned(runId)
@@ -439,13 +480,29 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
           }
           await transcribe(items)
           thread = data.thread
+          if (Date.now() - lastUsagePollAt >= 1500) {
+            lastUsagePollAt = Date.now()
+            emitLiveThreadUsage(false)
+          }
           const run = data.recentRuns.find((r) => r.runId === runId)
           if (run && terminal.has(run.status)) {
             settled = true
+            const snap = emitLiveThreadUsage(true)
+            const ru = snap?.byRunId[runId]
             if (run.status === 'failed' || run.status === 'rolled_back') {
               throw new Error(lastRunError ? `T3 Code could not complete this turn: ${lastRunError.slice(0, 400)}` : 'T3 Code could not complete this turn. Open the conversation in T3 Code for details.')
             }
-            return { stopReason: stopped || run.status !== 'completed' ? 'cancelled' : 'end_turn' }
+            return {
+              stopReason: stopped || run.status !== 'completed' ? 'cancelled' : 'end_turn',
+              ...(ru ? {
+                usage: {
+                  inputTokens: ru.inputTokens,
+                  outputTokens: ru.outputTokens,
+                  cachedReadTokens: ru.cacheReadTokens,
+                  cachedWriteTokens: ru.cacheWriteTokens,
+                },
+              } : {}),
+            }
           }
           if (Date.now() >= deadline) {
             await stopOwned(runId)
@@ -531,7 +588,11 @@ const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
         }
         throw err
       } finally { if (settled) running = undefined }
-    } finally { activePrompt = false; deadlineAt = 0 }
+    } finally {
+      activePrompt = false
+      deadlineAt = 0
+      if (pendingSelection && !closing) await flushPendingSelection().catch(() => {})
+    }
   },
   'session/cancel': async () => {
     stopped = true
@@ -584,6 +645,7 @@ async function close() {
   try {
     await handlers['session/cancel']!({})
     await promptDone?.catch(() => {})
+    if (pendingSelection) await flushPendingSelection().catch(() => {})
   } finally { await Promise.allSettled([client.close(), disposeSupervisorWorkers()]) }
   process.exit(0)
 }

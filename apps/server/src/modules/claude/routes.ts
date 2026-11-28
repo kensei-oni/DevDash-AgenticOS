@@ -120,7 +120,7 @@ export function claudeRoutes(claude: ClaudeService, mw: ReturnType<typeof authMi
     .patch('/sessions/:id', json(PatchInput), async (c) => c.json({ session: await claude.update(c.get('user'), c.req.param('id'), c.req.valid('json')) }))
     .get('/sessions/:id/messages', query(z.object({ before: z.string().max(64).optional() })), async (c) =>
       c.json(await claude.history(c.get('user'), c.req.param('id'), c.req.valid('query').before)))
-    .get('/sessions/:id/usage', (c) => c.json({ usage: claude.sessionUsage(c.get('user'), c.req.param('id')) }))
+    .get('/sessions/:id/usage', async (c) => c.json({ usage: await claude.sessionUsage(c.get('user'), c.req.param('id')) }))
     .get('/sessions/:id/subagent', query(z.object({ toolUseId: z.string().min(1).max(100) })), async (c) =>
       c.json(await claude.subagent(c.get('user'), c.req.param('id'), c.req.valid('query').toolUseId)))
     .post('/sessions/:id/tasks/:taskId/stop', async (c) => {

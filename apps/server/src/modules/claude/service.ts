@@ -953,7 +953,25 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
     },
 
     /** This session's own usage so far (cost + tokens + turns). Same visibility as any other session read. */
-    sessionUsage: (user: User, id: string) => (find(user, id), sumTurns(repo.turns(id))),
+    async sessionUsage(user: User, id: string): Promise<SessionUsage> {
+      const s = find(user, id)
+      const saved = sumTurns(repo.turns(id))
+      if (s.harness !== 't3code') return saved
+      if (!s.native_id) return { cost: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, turns: 0 }
+      try {
+        const res = await agents.request<{ usage: SessionUsage }>(
+          s.owner_username,
+          { op: 't3.usage.thread', threadId: s.native_id },
+          5_000,
+        )
+        if (res?.usage && (res.usage.turns > 0 || (saved.inputTokens === 0 && saved.outputTokens === 0 && saved.cost === 0))) {
+          return res.usage
+        }
+      } catch {
+        // Fall back to saved turns if the member agent is momentarily unreachable.
+      }
+      return saved
+    },
 
     async create(user: User, input: {
       prompt: string; images: Image[]; cwd: string; profile: string; model: string | null; effort: string | null
@@ -1472,6 +1490,7 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
         connected: boolean
         checkedAt: string
         refreshing?: boolean
+        defaultModel?: string | null
         accounts: {
           id: string
           instanceId: string | null

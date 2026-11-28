@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { ArrowUpRight, RotateCw } from 'lucide-react'
@@ -9,14 +9,11 @@ import { ErrorAlert } from '../auth/LoginPage'
 import type { Harness } from './harness'
 import { LimitWindowRow } from './T3UsagePage'
 import {
-  aggregateT3Usage,
-  browserTimeZone,
-  formatCompactTokens,
-  formatUsd,
+  groupLimitWindows,
   providerColor,
   providerLabel,
+  selectSessionLimitsForModel,
   t3UsageLimitsQuery,
-  t3UsageSummaryQuery,
   useLiveT3Usage,
 } from './t3-usage'
 
@@ -30,11 +27,11 @@ export const usageQuery = (profile: string) => ({
   refetchInterval: 120_000,
 })
 
-export const sessionUsageQuery = (id: string) => ({
+export const sessionUsageQuery = (id: string, working = false) => ({
   queryKey: ['claude', 'session-usage', id],
   queryFn: () => unwrap(api.api.claude.sessions[':id'].usage.$get({ param: { id } })),
-  staleTime: 10_000,
-  refetchInterval: 15_000,
+  staleTime: working ? 1_500 : 8_000,
+  refetchInterval: working ? 2_500 : 12_000,
 })
 
 // Same formatters as the per-answer line (Blocks.tsx) so numbers read the same everywhere.
@@ -42,40 +39,13 @@ const kTokens = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M
 const money = (n: number) => (n < 0.0005 ? '$0' : n < 0.01 ? `$${n.toFixed(3)}` : `$${n.toFixed(2)}`)
 
 /** This session's own running total: cost, tokens in/out and how many answers, above the plan limits. */
-function SessionUsage({ id, harness }: { id: string; harness?: Harness }) {
-  const q = useQuery(sessionUsageQuery(id))
-  const tz = useMemo(() => browserTimeZone(), [])
-  const daySummaryQ = useQuery({
-    ...t3UsageSummaryQuery('day', tz),
-    enabled: harness === 't3code',
-  })
+function SessionUsage({ id, working }: { id: string; working?: boolean }) {
+  const q = useQuery(sessionUsageQuery(id, working))
 
   if (q.isPending) return <Skeleton className="h-10" />
   if (q.error) return <ErrorAlert error={q.error} />
   const u = q.data.usage
   const read = u.inputTokens + u.cacheReadTokens + u.cacheWriteTokens
-
-  if (harness === 't3code' && read === 0 && u.outputTokens === 0 && u.cost === 0) {
-    const dayAgg = aggregateT3Usage(daySummaryQ.data)
-    return (
-      <div className="flex flex-col gap-1.5">
-        <div className="flex items-baseline justify-between gap-2">
-          <span className="font-medium">This session</span>
-          <span className="text-xs tabular-nums text-muted-foreground">
-            {u.turns > 0 ? `${u.turns} turn${u.turns === 1 ? '' : 's'}` : 'No answers yet'}
-          </span>
-        </div>
-        {daySummaryQ.data?.connected && (
-          <div className="flex items-baseline justify-between gap-2 rounded-xl bg-surface px-3 py-2 text-xs tabular-nums">
-            <span className="text-muted-foreground">Last 24h in T3 Code</span>
-            <span className="font-medium text-foreground">
-              {formatCompactTokens(dayAgg.totalTokens)} tok · {formatUsd(dayAgg.costUsd)}
-            </span>
-          </div>
-        )}
-      </div>
-    )
-  }
 
   return (
     <div className="flex flex-col gap-1">
@@ -117,6 +87,7 @@ export function PlanUsage({
   limits = true,
   harness,
   model,
+  working,
 }: {
   profile: string
   sessionId?: string
@@ -124,10 +95,11 @@ export function PlanUsage({
   limits?: boolean
   harness?: Harness
   model?: string | null
+  working?: boolean
 }) {
   return (
     <div className={cn('flex flex-col gap-4', className)}>
-      {sessionId && <SessionUsage id={sessionId} harness={harness} />}
+      {sessionId && <SessionUsage id={sessionId} working={working} />}
       {harness === 't3code' ? (
         <div className="flex flex-col gap-3">
           {sessionId && (
@@ -152,15 +124,6 @@ export function PlanUsage({
   )
 }
 
-function modelDriver(model: string | null | undefined): string | null {
-  if (!model || !model.includes('/')) return null
-  const prefix = model.slice(0, model.indexOf('/')).trim()
-  if (!prefix) return null
-  if (prefix === 'claude' || prefix === 'anthropic') return 'claudeAgent'
-  if (prefix === 'openai') return 'codex'
-  return prefix
-}
-
 function T3SessionLimits({ model }: { model?: string | null }) {
   useLiveT3Usage()
   const q = useQuery(t3UsageLimitsQuery())
@@ -177,9 +140,30 @@ function T3SessionLimits({ model }: { model?: string | null }) {
     return <p className="text-xs text-muted-foreground">T3 Code is not connected yet.</p>
   }
 
-  const activeDriver = modelDriver(model)
-  const withWindows = q.data.accounts.filter((a) => a.windows.length > 0)
-  if (!withWindows.length) {
+  const selected = selectSessionLimitsForModel(q.data.accounts, model, q.data.defaultModel)
+
+  if (selected.kind === 'no_windows_for_provider') {
+    const acct = selected.account
+    const color = providerColor(acct?.driver ?? selected.driver, acct?.accentColor)
+    const name = acct?.displayName || acct?.label || providerLabel(selected.driver)
+    const msg = acct?.unavailable?.reason === 'probeFailed'
+      ? (acct.unavailable.message || 'Could not read rate limits right now.')
+      : selected.driver === 'opencode'
+        ? 'No subscription rate limits (billed per token).'
+        : (acct?.unavailable?.message || 'No rate-limit windows reported for this model.')
+    return (
+      <div className="flex flex-col gap-1.5 text-xs">
+        <span className="inline-flex min-w-0 items-center gap-1.5 font-medium">
+          <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+          <span className="truncate">{name}</span>
+          {acct?.plan && <span className="truncate text-muted-foreground">· {acct.plan}</span>}
+        </span>
+        <p className="text-muted-foreground">{msg}</p>
+      </div>
+    )
+  }
+
+  if (!selected.accounts.length) {
     return (
       <div className="flex flex-col gap-2 text-xs text-muted-foreground">
         <p>No live rate-limit windows reported by your T3 Code providers right now.</p>
@@ -190,12 +174,6 @@ function T3SessionLimits({ model }: { model?: string | null }) {
     )
   }
 
-  const ordered = [...withWindows].sort((a, b) => {
-    const aMatch = activeDriver && a.driver === activeDriver ? 0 : 1
-    const bMatch = activeDriver && b.driver === activeDriver ? 0 : 1
-    return aMatch - bMatch
-  })
-
   return (
     <div className="flex flex-col gap-4">
       {q.data.refreshing && (
@@ -204,27 +182,49 @@ function T3SessionLimits({ model }: { model?: string | null }) {
           <span>Syncing live provider limits…</span>
         </div>
       )}
-      {ordered.map((acct) => {
+      {selected.accounts.map(({ account: acct, poolLabel, windows }) => {
         const color = providerColor(acct.driver, acct.accentColor)
+        const groups = poolLabel ? null : groupLimitWindows(windows)
+        const showGroups = !poolLabel && groups !== null && (groups.length > 1 || (groups.length === 1 && groups[0]!.group !== null))
         return (
           <div key={acct.id} className="flex flex-col gap-2.5">
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <span className="inline-flex min-w-0 items-center gap-1.5 font-medium">
-                <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-                <span className="truncate">{acct.displayName || acct.label || providerLabel(acct.driver)}</span>
-                {acct.plan && <span className="truncate text-muted-foreground">· {acct.plan}</span>}
-              </span>
-              {acct.resetCredits && acct.resetCredits.availableCount > 0 && (
-                <Link to="/usage" search={{ tab: 'limits' }} className="shrink-0 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground hover:text-foreground">
-                  {acct.resetCredits.availableCount} reset{acct.resetCredits.availableCount === 1 ? '' : 's'}
-                </Link>
+            <div className="flex flex-col gap-0.5">
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="inline-flex min-w-0 items-center gap-1.5 font-medium">
+                  <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+                  <span className="truncate">{acct.displayName || acct.label || providerLabel(acct.driver)}</span>
+                  {acct.plan && <span className="truncate text-muted-foreground">· {acct.plan}</span>}
+                </span>
+                {acct.resetCredits && acct.resetCredits.availableCount > 0 && (
+                  <Link to="/usage" search={{ tab: 'limits' }} className="shrink-0 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground hover:text-foreground">
+                    {acct.resetCredits.availableCount} reset{acct.resetCredits.availableCount === 1 ? '' : 's'}
+                  </Link>
+                )}
+              </div>
+              {poolLabel && (
+                <span className="pl-3.5 text-[11px] text-muted-foreground">{poolLabel}</span>
               )}
             </div>
-            <div className="flex flex-col gap-2.5">
-              {acct.windows.map((w) => (
-                <LimitWindowRow key={w.id} window={w} color={color} nowMs={nowMs} compact />
-              ))}
-            </div>
+            {showGroups ? (
+              <div className="flex flex-col gap-3">
+                {groups!.map((grp) => (
+                  <div key={grp.key} className="flex flex-col gap-2">
+                    {grp.group && <span className="text-[11px] font-medium text-muted-foreground">{grp.group}</span>}
+                    <div className="flex flex-col gap-2.5">
+                      {grp.windows.map((w) => (
+                        <LimitWindowRow key={w.id} window={w} color={color} nowMs={nowMs} compact />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2.5">
+                {windows.map((w) => (
+                  <LimitWindowRow key={w.id} window={w} color={color} nowMs={nowMs} compact />
+                ))}
+              </div>
+            )}
           </div>
         )
       })}
@@ -249,23 +249,22 @@ function PlanLimits({ profile }: { profile: string }) {
   }
   return (
     <div className="flex flex-col gap-3">
-      {limits.map((l, i) => {
-        const pct = Math.max(0, Math.min(100, l.percent ?? 0))
-        const tone = l.severity === 'critical' || pct >= 90 ? 'bg-destructive' : l.severity === 'warning' || pct >= 75 ? 'bg-attention' : 'bg-foreground/80'
+      {limits.map((l) => {
+        const pct = Math.min(100, Math.max(0, l.percent ?? 0))
+        const hot = l.severity === 'critical' || pct >= 90
         return (
-          <div key={i} className="flex flex-col gap-1">
+          <div key={l.kind} className="flex flex-col gap-1">
             <div className="flex items-baseline justify-between gap-2">
-              <span>{label(l)}</span>
-              <span className="tabular-nums text-muted-foreground">{l.percent === null ? '—' : `${Math.round(pct)}%`}</span>
+              <span className="font-medium">{label(l)}</span>
+              <span className="tabular-nums text-muted-foreground">{Math.round(pct)}%</span>
             </div>
-            <div className="h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label={label(l)} aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
-              <div className={cn('h-full rounded-full', tone)} style={{ width: `${pct}%` }} />
+            <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+              <div className={cn('h-full rounded-full transition-all', hot ? 'bg-destructive' : pct >= 75 ? 'bg-attention' : 'bg-foreground')} style={{ width: `${pct}%` }} />
             </div>
             {l.resets_at && <span className="text-xs text-muted-foreground">{resets(l.resets_at)}</span>}
           </div>
         )
       })}
-      {u.plan && <p className="text-xs text-muted-foreground">Claude {u.plan.charAt(0).toUpperCase() + u.plan.slice(1)} plan, {profile === 'default' ? 'default profile' : `profile ${profile}`}. Shared by everything that uses this Claude account.</p>}
     </div>
   )
 }

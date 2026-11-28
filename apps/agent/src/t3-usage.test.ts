@@ -6,6 +6,8 @@ import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { parseLiteLLMRateTable, priceTurnTokens, readT3DefaultModel, readT3ThreadUsage } from './t3-thread-usage.ts'
 import {
   clearAntigravityLimitsCache,
   getAntigravityUsageLimits,
@@ -281,4 +283,131 @@ test('getAntigravityUsageLimits refreshes expired tokens on 401, falls back to C
     },
   })
   assert.equal(fallback?.remainingPercent, 50)
+})
+
+test('readT3ThreadUsage isolates per-thread tokens & USD cost across mid-session model switches without 24h bleed', () => {
+  const table = parseLiteLLMRateTable({
+    'gemini/gemini-4-carbon': {
+      input_cost_per_token: 2e-6,
+      output_cost_per_token: 10e-6,
+      cache_read_input_token_cost: 0.1e-6,
+      input_cost_per_token_above_200k_tokens: 4e-6,
+      output_cost_per_token_above_200k_tokens: 20e-6,
+    },
+    'gpt-6.2-astra': {
+      input_cost_per_token: 8e-6,
+      output_cost_per_token: 40e-6,
+      cache_read_input_token_cost: 0.4e-6,
+      input_cost_per_token_above_200k_tokens: 16e-6,
+      output_cost_per_token_above_200k_tokens: 80e-6,
+    },
+  })
+
+  // Multi-step turn with 3.67M cumulative input tokens across steps but 61k context window stays on base tier (<200k)
+  const codexTurnCost = priceTurnTokens({
+    driver: 'codex',
+    model: 'gpt-6.2-astra',
+    contextTokens: 61_419,
+    uncachedInputTokens: 62_677,
+    cachedInputTokens: 4_139_008,
+    cacheCreationTokens: 0,
+    outputTokens: 7_289,
+    table,
+  })
+  assert.equal(codexTurnCost.toFixed(4), '2.4486')
+
+  const uid = process.getuid?.() ?? 0
+  if (uid === 0 || uid < 1000) return
+
+  const root = mkdtempSync(join(tmpdir(), 't3-thread-usage-test-'), { encoding: 'utf8' })
+  try {
+    mkdirSync(root, { recursive: true, mode: 0o700 })
+    const userdata = join(root, 'userdata')
+    mkdirSync(userdata, { recursive: true, mode: 0o700 })
+    writeFileSync(join(userdata, 'settings.json'), JSON.stringify({
+      defaultModelSelection: { instanceId: 'codex', model: 'gpt-6.1-sol' },
+    }), { mode: 0o600 })
+    writeFileSync(join(userdata, 'usage-model-rates.json'), JSON.stringify({
+      fetchedAtMs: Date.now(),
+      document: {
+        'gemini/gemini-4-carbon': {
+          input_cost_per_token: 2e-6,
+          output_cost_per_token: 10e-6,
+          cache_read_input_token_cost: 0.1e-6,
+        },
+        'gpt-6.2-astra': {
+          input_cost_per_token: 8e-6,
+          output_cost_per_token: 40e-6,
+          cache_read_input_token_cost: 0.4e-6,
+        },
+      },
+    }), { mode: 0o600 })
+
+    const db = new DatabaseSync(join(userdata, 'statev2.sqlite'))
+    db.exec(`
+      CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT PRIMARY KEY, payload_json TEXT);
+      CREATE TABLE orchestration_v2_projection_provider_threads (provider_thread_id TEXT PRIMARY KEY, thread_id TEXT, driver TEXT, provider_instance_id TEXT, payload_json TEXT);
+      CREATE TABLE orchestration_v2_projection_runs (run_id TEXT PRIMARY KEY, thread_id TEXT, payload_json TEXT);
+      CREATE TABLE orchestration_v2_projection_run_attempts (attempt_id TEXT PRIMARY KEY, run_id TEXT, thread_id TEXT);
+      CREATE TABLE orchestration_v2_projection_provider_turns (provider_turn_id TEXT PRIMARY KEY, thread_id TEXT, provider_thread_id TEXT, run_attempt_id TEXT, status TEXT, payload_json TEXT);
+    `)
+
+    // Thread A: Turn 1 on Antigravity Gemini 4 Carbon, then switched mid-session to Turn 2 on Codex GPT-6.2 Astra
+    db.prepare(`INSERT INTO orchestration_v2_projection_threads VALUES (?, ?)`).run(
+      'thread-a',
+      JSON.stringify({ id: 'thread-a', providerInstanceId: 'codex', modelSelection: { instanceId: 'codex', model: 'gpt-6.2-astra' }, activeProviderThreadId: 'pth-a2' }),
+    )
+    db.prepare(`INSERT INTO orchestration_v2_projection_provider_threads VALUES (?, ?, ?, ?, ?)`).run(
+      'pth-a1', 'thread-a', 'antigravity', 'antigravity', JSON.stringify({ contextUsage: { usedTokens: 40_000, maxTokens: 1_000_000 } }),
+    )
+    db.prepare(`INSERT INTO orchestration_v2_projection_provider_threads VALUES (?, ?, ?, ?, ?)`).run(
+      'pth-a2', 'thread-a', 'codex', 'codex', JSON.stringify({ contextUsage: { usedTokens: 55_000, maxTokens: 258_400 } }),
+    )
+    db.prepare(`INSERT INTO orchestration_v2_projection_runs VALUES (?, ?, ?)`).run(
+      'run-a1', 'thread-a', JSON.stringify({ modelSelection: { instanceId: 'antigravity', model: 'gemini-4-carbon' } }),
+    )
+    db.prepare(`INSERT INTO orchestration_v2_projection_runs VALUES (?, ?, ?)`).run(
+      'run-a2', 'thread-a', JSON.stringify({ modelSelection: { instanceId: 'codex', model: 'gpt-6.2-astra' } }),
+    )
+    db.prepare(`INSERT INTO orchestration_v2_projection_run_attempts VALUES (?, ?, ?)`).run('att-a1', 'run-a1', 'thread-a')
+    db.prepare(`INSERT INTO orchestration_v2_projection_run_attempts VALUES (?, ?, ?)`).run('att-a2', 'run-a2', 'thread-a')
+
+    db.prepare(`INSERT INTO orchestration_v2_projection_provider_turns VALUES (?, ?, ?, ?, ?, ?)`).run(
+      'pt-a1', 'thread-a', 'pth-a1', 'att-a1', 'completed',
+      JSON.stringify({ turnTokenUsage: { inputTokens: 110_000, cachedInputTokens: 100_000, cacheCreationTokens: 0, outputTokens: 1_000 } }),
+    )
+    db.prepare(`INSERT INTO orchestration_v2_projection_provider_turns VALUES (?, ?, ?, ?, ?, ?)`).run(
+      'pt-a2', 'thread-a', 'pth-a2', 'att-a2', 'completed',
+      JSON.stringify({ model: 'gpt-6.2-astra', turnTokenUsage: { inputTokens: 50_000, cachedInputTokens: 40_000, cacheCreationTokens: 0, outputTokens: 500 } }),
+    )
+
+    // Thread B: Heavy unrelated session in last 24h (must NOT leak into Thread A or empty Thread C)
+    db.prepare(`INSERT INTO orchestration_v2_projection_provider_turns VALUES (?, ?, ?, ?, ?, ?)`).run(
+      'pt-b1', 'thread-b', 'pth-a2', null, 'completed',
+      JSON.stringify({ model: 'gpt-6.2-astra', turnTokenUsage: { inputTokens: 5_000_000, cachedInputTokens: 0, cacheCreationTokens: 0, outputTokens: 100_000 } }),
+    )
+    db.close()
+
+    assert.equal(readT3DefaultModel(root), 'codex/gpt-6.1-sol')
+
+    const snapEmpty = readT3ThreadUsage('thread-c-brand-new', { baseDir: root })
+    assert.equal(snapEmpty.usage.turns, 0)
+    assert.equal(snapEmpty.usage.cost, 0)
+    assert.equal(snapEmpty.usage.inputTokens, 0)
+    assert.equal(snapEmpty.usage.outputTokens, 0)
+
+    const snapA = readT3ThreadUsage('thread-a', { baseDir: root })
+    assert.equal(snapA.usage.turns, 2)
+    assert.equal(snapA.usage.inputTokens, 20_000) // (110k-100k) + (50k-40k)
+    assert.equal(snapA.usage.cacheReadTokens, 140_000)
+    assert.equal(snapA.usage.outputTokens, 1_500)
+    // Turn 1: 10k*2e-6 (0.02) + 100k*0.1e-6 (0.01) + 1k*10e-6 (0.01) = $0.04
+    // Turn 2: 10k*8e-6 (0.08) + 40k*0.4e-6 (0.016) + 0.5k*40e-6 (0.02) = $0.116 -> total $0.156
+    assert.equal(snapA.usage.cost.toFixed(4), '0.1560')
+    assert.equal(snapA.byRunId['run-a1']?.cost.toFixed(4), '0.0400')
+    assert.equal(snapA.byRunId['run-a2']?.cost.toFixed(4), '0.1160')
+    assert.deepEqual(snapA.context, { usedTokens: 55_000, maxTokens: 258_400 })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

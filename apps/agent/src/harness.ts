@@ -925,6 +925,7 @@ export async function disconnectT3() {
   return res
 }
 export const t3UsageLimits = (opts?: { refresh?: boolean }) => t3code.getUsageLimits(opts)
+export const t3ThreadUsage = (threadId: string) => t3code.readT3ThreadUsage(threadId)
 export const t3UsageSummary = (opts?: { period?: 'day' | 'week' | 'month' | 'quarter'; timeZone?: string; refresh?: boolean }) => t3code.getUsageSummary(opts)
 export const t3RefreshUsageRates = () => t3code.refreshUsageRates()
 export const t3SaveUsagePricing = (input: Parameters<typeof t3code.saveUsagePricing>[0]) => t3code.saveUsagePricing(input)

@@ -8,6 +8,8 @@ import {
   formatShare,
   formatUsd,
   groupLimitWindows,
+  parseT3SessionModel,
+  selectSessionLimitsForModel,
   validateT3UsageSearch,
   type T3SummaryShape,
 } from './t3-usage-math.ts'
@@ -216,4 +218,90 @@ test('groupLimitWindows keeps ungrouped windows flat and groups consecutive Anti
   assert.equal(grouped[0]?.windows.length, 2)
   assert.equal(grouped[1]?.group, 'Claude & GPT models')
   assert.equal(grouped[1]?.windows.length, 2)
+})
+
+test('selectSessionLimitsForModel scopes limits to the active session model pool and reacts to mid-session model switches', () => {
+  const accounts = [
+    {
+      id: 'provider:antigravity',
+      instanceId: 'antigravity',
+      driver: 'antigravity',
+      label: 'Antigravity',
+      displayName: 'Antigravity',
+      accentColor: null,
+      plan: 'Google AI Pro',
+      windows: [
+        { id: 'g-5h', kind: 'session' as const, label: 'Session', group: 'Gemini models', usedPercent: 24, remainingPercent: 76, resetsAt: null, windowDurationMins: 300 },
+        { id: 'g-wk', kind: 'weekly' as const, label: 'Weekly', group: 'Gemini models', usedPercent: 64, remainingPercent: 36, resetsAt: null, windowDurationMins: 10080 },
+        { id: 'c-5h', kind: 'session' as const, label: 'Session', group: 'Claude & GPT models', usedPercent: 0, remainingPercent: 100, resetsAt: null, windowDurationMins: 300 },
+        { id: 'c-wk', kind: 'weekly' as const, label: 'Weekly', group: 'Claude & GPT models', usedPercent: 0, remainingPercent: 100, resetsAt: null, windowDurationMins: 10080 },
+      ],
+    },
+    {
+      id: 'provider:codex',
+      instanceId: 'codex',
+      driver: 'codex',
+      label: 'Codex',
+      displayName: 'Codex',
+      accentColor: null,
+      plan: 'ChatGPT Plus Subscription',
+      windows: [
+        { id: 'cx-5h', kind: 'session' as const, label: 'Session', usedPercent: 100, remainingPercent: 0, resetsAt: null, windowDurationMins: 300 },
+        { id: 'cx-wk', kind: 'weekly' as const, label: 'Weekly', usedPercent: 83, remainingPercent: 17, resetsAt: null, windowDurationMins: 10080 },
+      ],
+    },
+    {
+      id: 'provider:opencode',
+      instanceId: 'opencode',
+      driver: 'opencode',
+      label: 'OpenCode',
+      displayName: 'OpenCode',
+      accentColor: null,
+      plan: null,
+      windows: [],
+    },
+  ]
+
+  // 1. Antigravity Gemini model -> ONLY Antigravity Gemini pool (no Claude/GPT pool, no Codex)
+  const gemini = selectSessionLimitsForModel(accounts, 'antigravity/gemini-4-carbon', 'codex/gpt-6.1-sol')
+  assert.equal(gemini.kind, 'scoped')
+  assert.equal(gemini.accounts.length, 1)
+  assert.equal(gemini.accounts[0]!.account.driver, 'antigravity')
+  assert.equal(gemini.accounts[0]!.poolLabel, 'Gemini models')
+  assert.deepEqual(gemini.accounts[0]!.windows.map((w) => w.id), ['g-5h', 'g-wk'])
+
+  // 2. Switch mid-session to Antigravity Claude/GPT model -> ONLY Antigravity Claude & GPT pool
+  const claudePool = selectSessionLimitsForModel(accounts, 'antigravity/claude-opus-5-5', 'codex/gpt-6.1-sol')
+  assert.equal(claudePool.kind, 'scoped')
+  assert.equal(claudePool.accounts.length, 1)
+  assert.equal(claudePool.accounts[0]!.account.driver, 'antigravity')
+  assert.equal(claudePool.accounts[0]!.poolLabel, 'Claude & GPT models')
+  assert.deepEqual(claudePool.accounts[0]!.windows.map((w) => w.id), ['c-5h', 'c-wk'])
+
+  // 3. Switch mid-session to Codex -> ONLY Codex windows
+  const codex = selectSessionLimitsForModel(accounts, 'codex/gpt-6.2-astra', 'codex/gpt-6.1-sol')
+  assert.equal(codex.kind, 'scoped')
+  assert.equal(codex.accounts.length, 1)
+  assert.equal(codex.accounts[0]!.account.driver, 'codex')
+  assert.equal(codex.accounts[0]!.poolLabel, null)
+  assert.deepEqual(codex.accounts[0]!.windows.map((w) => w.id), ['cx-5h', 'cx-wk'])
+
+  // 4. Switch mid-session to OpenCode (no subscription rate limits) -> no_windows_for_provider
+  const opencode = selectSessionLimitsForModel(accounts, 'opencode/opencode/deepseek-v4.1-flash-free', 'codex/gpt-6.1-sol')
+  assert.equal(opencode.kind, 'no_windows_for_provider')
+  assert.equal(opencode.driver, 'opencode')
+  assert.equal(opencode.account?.id, 'provider:opencode')
+
+  // 5. Session on T3 Default (model = null) -> resolves T3 defaultModel ('codex/gpt-6.1-sol')
+  const def = selectSessionLimitsForModel(accounts, null, 'codex/gpt-6.1-sol')
+  assert.equal(def.kind, 'scoped')
+  assert.equal(def.accounts.length, 1)
+  assert.equal(def.accounts[0]!.account.driver, 'codex')
+
+  assert.deepEqual(parseT3SessionModel('gemini-4-neon'), {
+    raw: 'gemini-4-neon',
+    instanceId: 'antigravity',
+    driver: 'antigravity',
+    modelSlug: 'gemini-4-neon',
+  })
 })

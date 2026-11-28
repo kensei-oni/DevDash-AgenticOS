@@ -11,6 +11,9 @@ import { promisify } from 'node:util'
 import { readConfig } from './t3-client.ts'
 import { assertMemberEndpoint, assertRegularMemberUid, memberAuthFetch, memberWsUpgrade, validateMemberUrl } from './t3-local.ts'
 import { clearAntigravityLimitsCache, getAntigravityUsageLimits } from './t3-antigravity-limits.ts'
+import { readT3DefaultModel, readT3ThreadUsage } from './t3-thread-usage.ts'
+
+export { readT3ThreadUsage }
 
 const execFileAsync = promisify(execFile)
 const DEFAULT_T3_BIN = '/opt/devdash/t3code/current/t3'
@@ -83,6 +86,7 @@ export type T3LimitsResponse = {
   connected: boolean
   checkedAt: string
   refreshing?: boolean
+  defaultModel?: string | null
   accounts: T3LimitAccount[]
   notices: string[]
   error?: string
@@ -1163,6 +1167,7 @@ export async function getUsageLimits(opts: { refresh?: boolean } = {}): Promise<
       connected: true,
       checkedAt: new Date().toISOString(),
       refreshing: refreshInFlight !== null,
+      defaultModel: readT3DefaultModel(baseDir),
       accounts,
       notices,
     }

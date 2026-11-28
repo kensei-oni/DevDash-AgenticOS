@@ -576,3 +576,182 @@ export function aggregateT3Usage(data: T3SummaryShape | undefined, hiddenProvide
     warnings: [...warnings],
   }
 }
+
+export type T3SessionLimitAccountShape<W extends T3LimitWindowShape = T3LimitWindowShape> = {
+  id: string
+  instanceId: string | null
+  driver: string
+  label: string
+  displayName: string | null
+  accentColor: string | null
+  plan: string | null
+  windows: W[]
+  resetCredits?: { availableCount: number } | null
+  unavailable?: { reason: 'unsupported' | 'probeFailed'; message: string | null } | null
+}
+
+export type ParsedT3SessionModel = {
+  raw: string | null
+  instanceId: string | null
+  driver: string | null
+  modelSlug: string | null
+}
+
+export function parseT3SessionModel(
+  model: string | null | undefined,
+  defaultModel?: string | null,
+): ParsedT3SessionModel {
+  const effective = typeof model === 'string' && model.trim()
+    ? model.trim()
+    : (typeof defaultModel === 'string' && defaultModel.trim() ? defaultModel.trim() : null)
+  if (!effective) return { raw: null, instanceId: null, driver: null, modelSlug: null }
+
+  const slash = effective.indexOf('/')
+  if (slash !== -1) {
+    const prefix = effective.slice(0, slash).trim()
+    const rest = effective.slice(slash + 1).trim()
+    const driver = !prefix
+      ? null
+      : prefix === 'claude' || prefix === 'anthropic'
+        ? 'claudeAgent'
+        : prefix === 'openai'
+          ? 'codex'
+          : prefix
+    return {
+      raw: effective,
+      instanceId: prefix || null,
+      driver,
+      modelSlug: rest || null,
+    }
+  }
+
+  const lower = effective.toLowerCase()
+  const driver = lower.startsWith('gemini') || lower === 'antigravity-default'
+    ? 'antigravity'
+    : lower.startsWith('claude')
+      ? 'claudeAgent'
+      : lower.startsWith('gpt') || /^o[134](?:$|-)/.test(lower) || lower.startsWith('codex')
+        ? 'codex'
+        : null
+  return {
+    raw: effective,
+    instanceId: driver,
+    driver,
+    modelSlug: effective,
+  }
+}
+
+export function matchAntigravityPoolGroup(modelSlug: string | null | undefined): string | null {
+  if (!modelSlug) return null
+  const bare = modelSlug.slice(modelSlug.lastIndexOf('/') + 1).trim().toLowerCase()
+  if (!bare) return null
+  if (bare.startsWith('gemini') || bare === 'antigravity-default') return 'Gemini models'
+  if (bare.startsWith('claude') || bare.startsWith('gpt') || /^o[134](?:$|-)/.test(bare)) return 'Claude & GPT models'
+  return null
+}
+
+function matchGenericWindowGroup<W extends T3LimitWindowShape>(
+  windows: W[],
+  driver: string,
+  modelSlug: string | null,
+): { poolLabel: string | null; windows: W[] } {
+  const groups = new Set(
+    windows
+      .map((w) => (typeof w.group === 'string' && w.group.trim() ? w.group.trim() : null))
+      .filter((g): g is string => g !== null),
+  )
+  if (groups.size <= 1 || !modelSlug) {
+    const singleGroup = groups.size === 1 ? [...groups][0]! : null
+    return { poolLabel: singleGroup, windows }
+  }
+
+  let targetGroup: string | null = null
+  if (driver === 'antigravity') {
+    targetGroup = matchAntigravityPoolGroup(modelSlug)
+  }
+  if (!targetGroup) {
+    const bare = modelSlug.slice(modelSlug.lastIndexOf('/') + 1).trim().toLowerCase()
+    for (const g of groups) {
+      const tokens = g.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length >= 3 && t !== 'models' && t !== 'model')
+      if (tokens.some((tok) => bare.startsWith(tok) || bare.includes(tok))) {
+        targetGroup = g
+        break
+      }
+    }
+  }
+
+  if (targetGroup && groups.has(targetGroup)) {
+    const filtered = windows.filter((w) => (w.group?.trim() ?? null) === targetGroup)
+    if (filtered.length > 0) return { poolLabel: targetGroup, windows: filtered }
+  }
+  return { poolLabel: null, windows }
+}
+
+export type SelectedSessionLimits<
+  W extends T3LimitWindowShape = T3LimitWindowShape,
+  A extends T3SessionLimitAccountShape<W> = T3SessionLimitAccountShape<W>,
+> =
+  | {
+      kind: 'scoped'
+      driver: string
+      modelSlug: string | null
+      accounts: { account: A; poolLabel: string | null; windows: W[] }[]
+    }
+  | {
+      kind: 'no_windows_for_provider'
+      driver: string
+      account: A | null
+    }
+  | {
+      kind: 'all'
+      accounts: { account: A; poolLabel: null; windows: W[] }[]
+    }
+
+export function selectSessionLimitsForModel<
+  W extends T3LimitWindowShape,
+  A extends T3SessionLimitAccountShape<W>,
+>(
+  accounts: A[],
+  model: string | null | undefined,
+  defaultModel?: string | null,
+): SelectedSessionLimits<W, A> {
+  const parsed = parseT3SessionModel(model, defaultModel)
+  if (!parsed.driver) {
+    return {
+      kind: 'all',
+      accounts: accounts
+        .filter((a) => a.windows.length > 0)
+        .map((a) => ({ account: a, poolLabel: null, windows: a.windows })),
+    }
+  }
+
+  const byInstance = parsed.instanceId
+    ? accounts.filter((a) => a.instanceId === parsed.instanceId)
+    : []
+  const matched = byInstance.length > 0
+    ? byInstance
+    : accounts.filter((a) => a.driver === parsed.driver)
+
+  const withWindows = matched.filter((a) => a.windows.length > 0)
+  if (withWindows.length === 0) {
+    return {
+      kind: 'no_windows_for_provider',
+      driver: parsed.driver,
+      account: matched[0] ?? null,
+    }
+  }
+
+  return {
+    kind: 'scoped',
+    driver: parsed.driver,
+    modelSlug: parsed.modelSlug,
+    accounts: withWindows.map((acct) => {
+      const scoped = matchGenericWindowGroup(acct.windows, acct.driver, parsed.modelSlug)
+      return {
+        account: acct,
+        poolLabel: scoped.poolLabel,
+        windows: scoped.windows,
+      }
+    }),
+  }
+}

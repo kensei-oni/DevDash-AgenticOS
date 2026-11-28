@@ -149,6 +149,7 @@ const ops: Record<string, (r: Req) => Promise<unknown> | unknown> = {
   }),
   't3.disconnect': async () => harness.disconnectT3(),
   't3.usage.limits': async (r) => harness.t3UsageLimits({ refresh: r.refresh === true }),
+  't3.usage.thread': async (r) => ({ usage: harness.t3ThreadUsage(str(r.threadId, 'threadId')).usage }),
   't3.usage.summary': async (r) => harness.t3UsageSummary({
     period: typeof r.period === 'string' ? r.period as 'day' | 'week' | 'month' | 'quarter' : undefined,
     timeZone: typeof r.timeZone === 'string' ? r.timeZone : undefined,

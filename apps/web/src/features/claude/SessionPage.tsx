@@ -38,7 +38,7 @@ import { createLiveText, type LiveTextStore } from './live-text'
 import { useArchiveSession } from './ArchiveSession'
 import { ShareDialog, sharingLabel } from './ShareDialog'
 import { Requests, requestSummary } from './Requests'
-import { PlanUsage } from './Usage'
+import { PlanUsage, sessionUsageQuery } from './Usage'
 import { agentCapabilities, agentName, HARNESS, harnessOf } from './harness'
 import { servicesQuery, stateOf } from '../services/data'
 import { tailnetStatusQuery } from '../network/NetworkPage'
@@ -126,7 +126,11 @@ export function SessionView({ id, embedded }: { id: string; embedded?: Embedded 
     )
 
   useTopic(`session:${id}`, (e) => {
-    if (e.type === 'session') setSession(e.session as Session)
+    if (e.type === 'session') {
+      const next = e.session as Session
+      if (next.status !== s?.status) void qc.invalidateQueries({ queryKey: sessionUsageQuery(id).queryKey })
+      setSession(next)
+    }
     else if (e.type === 'viewers') setViewers(e.viewers as Person[])
     else if (e.type === 'access') void info.refetch()
     else if (e.type === 'join_request') {
@@ -165,6 +169,7 @@ export function SessionView({ id, embedded }: { id: string; embedded?: Embedded 
         return
       }
       if (m.type === 'assistant' && !m.parent_tool_use_id) liveText.reset()
+      if (m.type === 'result') void qc.invalidateQueries({ queryKey: sessionUsageQuery(id).queryKey })
       // Live messages carry no time of their own: they happened now.
       setRaw((r) => mergeRaw(r, [m.timestamp ? m : { ...m, timestamp: new Date().toISOString() }]))
     }
@@ -291,6 +296,11 @@ export function SessionView({ id, embedded }: { id: string; embedded?: Embedded 
   // Owner or full access: messages run with the owner's access, and the CLI is theirs to use.
   const fullAccess = isOwner || info.data!.access === 'full'
   const working = s.status === 'working'
+  const effectiveModel = update.isPending && update.variables?.model !== undefined ? update.variables.model : s.model
+  const effectiveEffort = update.isPending && update.variables?.effort !== undefined ? update.variables.effort : s.effort
+  const liveSession = effectiveModel !== s.model || effectiveEffort !== s.effort
+    ? { ...s, model: effectiveModel, effort: effectiveEffort }
+    : s
   const watching = viewers.filter((v) => v.id !== me.id).length
   const showComments = s.shared || commentCount > 0
 
@@ -323,7 +333,7 @@ export function SessionView({ id, embedded }: { id: string; embedded?: Embedded 
         actions={<>
           <div className="hidden xl:flex"><Watchers viewers={viewers} me={me.id} /></div>
           {showComments && <CommentsButton count={commentCount} onClick={() => setCommentsOpen(true)} />}
-          <ModelMenu s={s} disabled={!canSend} isOwner={isOwner} onUpdate={(v) => update.mutate(v)} />
+          <ModelMenu s={liveSession} disabled={!canSend} isOwner={isOwner} onUpdate={(v) => update.mutate(v)} />
           {HARNESS[harnessOf(s)].cli && <Tabs value={s.mode} onValueChange={(v) => v !== s.mode && switchMode.mutate(v as 'chat' | 'cli')}>
             <TabsList className="pointer-coarse:h-10!">
               <TabsTrigger value="chat" disabled={!canSend || switchMode.isPending}><MessageSquare /><span className="hidden xl:inline">Chat</span></TabsTrigger>
@@ -370,7 +380,7 @@ export function SessionView({ id, embedded }: { id: string; embedded?: Embedded 
             </div>
           </div>
         </div>
-        {!embedded && <SessionAside s={s} blocks={blocks} isOwner={isOwner} />}
+        {!embedded && <SessionAside s={liveSession} blocks={blocks} isOwner={isOwner} working={working} />}
         </div>
       )}
       <Comments id={id} open={commentsOpen} onOpenChange={setCommentsOpen} me={me.id} />
@@ -378,8 +388,8 @@ export function SessionView({ id, embedded }: { id: string; embedded?: Embedded 
       {isOwner && <TailnetDialog open={tailnet} onOpenChange={setTailnet} s={s} onUpdate={(v) => update.mutateAsync(v)} />}
       {isOwner && <ShareDialog open={share} onOpenChange={setShare} s={s} me={me.id} people={info.data!.people} writers={info.data!.writers} onSaved={() => void info.refetch()} />}
       {isOwner && (
-        <ResponsiveDialog open={usage} onOpenChange={setUsage} title="Usage" description={harnessOf(s) === 't3code' ? "This session's own cost and tokens, plus live rate limits from your T3 Code providers." : HARNESS[harnessOf(s)].planLimits ? "This session's own cost and tokens, and your Claude plan's limits (the same as /usage in Claude Code)." : "This session's own cost and tokens, as its model provider prices them."}>
-          <PlanUsage profile={s.profile} sessionId={s.id} className="pb-2 text-sm" limits={HARNESS[harnessOf(s)].planLimits} harness={harnessOf(s)} model={s.model} />
+        <ResponsiveDialog open={usage} onOpenChange={setUsage} title="Usage" description={harnessOf(s) === 't3code' ? "This session's own cost and tokens, plus live rate limits for its current T3 Code model." : HARNESS[harnessOf(s)].planLimits ? "This session's own cost and tokens, and your Claude plan's limits (the same as /usage in Claude Code)." : "This session's own cost and tokens, as its model provider prices them."}>
+          <PlanUsage profile={liveSession.profile} sessionId={liveSession.id} className="pb-2 text-sm" limits={HARNESS[harnessOf(liveSession)].planLimits} harness={harnessOf(liveSession)} model={liveSession.model} working={working} />
         </ResponsiveDialog>
       )}
     </div>
@@ -436,7 +446,7 @@ function Elapsed({ since }: { since?: number }) {
 }
 
 /** Wide screens: what Claude is doing at a glance, beside the conversation. */
-function SessionAside({ s, blocks, isOwner }: { s: Session; blocks: ReturnType<typeof buildTranscript>; isOwner: boolean }) {
+function SessionAside({ s, blocks, isOwner, working }: { s: Session; blocks: ReturnType<typeof buildTranscript>; isOwner: boolean; working?: boolean }) {
   const { todos, files } = useMemo(() => sessionFacts(blocks), [blocks])
   const services = useQuery(servicesQuery).data?.services.filter((x) => x.session?.id === s.id) ?? []
   const done = todos.filter((t) => t.status === 'completed').length
@@ -488,7 +498,7 @@ function SessionAside({ s, blocks, isOwner }: { s: Session; blocks: ReturnType<t
       {isOwner && (
         <section className="flex flex-col gap-2">
           <h2 className="font-medium">Usage</h2>
-          <PlanUsage profile={s.profile} sessionId={s.id} limits={HARNESS[harnessOf(s)].planLimits} harness={harnessOf(s)} model={s.model} />
+          <PlanUsage profile={s.profile} sessionId={s.id} limits={HARNESS[harnessOf(s)].planLimits} harness={harnessOf(s)} model={s.model} working={working} />
         </section>
       )}
       <section className="flex flex-col gap-2">
