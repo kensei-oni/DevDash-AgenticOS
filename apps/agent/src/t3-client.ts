@@ -176,7 +176,7 @@ export class T3Client {
     const session = this.session
     if (!session) { this.connected = false; return }
     try {
-      const response = await memberFetch(this.config.url, { method: 'DELETE', headers: this.headers(), signal: AbortSignal.timeout(Math.min(this.timeoutMs, 250)) })
+      const response = await memberFetch(this.config.url, { method: 'DELETE', headers: this.headers(), signal: AbortSignal.timeout(Math.min(this.timeoutMs, 1500)) })
       await response.body?.cancel()
     } catch { /* A stopped server or expired session is already closed. */ }
     this.session = null

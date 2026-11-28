@@ -199,13 +199,19 @@ async function flushPendingSelection() {
 }
 /** Validate the whole selection before T3 changes anything; if a turn is actively running, apply immediately when supported or queue for turn completion. */
 async function setSelection(model: string | null, requestedEffort: string | null) {
+  if (unresolvedSend || ((running || activePrompt) && stopped)) {
+    throw new Error('Wait for T3 Code to finish before changing its model or effort.')
+  }
   const [freshCaps, current] = await Promise.all([connectedCapabilities(client), pendingSelection ? Promise.resolve(pendingSelection) : readSelection()])
   caps = freshCaps
   // Keep unrelated options such as service tier when only the reasoning level changes.
   const picked = !model || model === modelId(current.instanceId, current.model) ? current : selection(model)
   const modelSelection = await withEffort(picked, requestedEffort)
+  if (!running && !activePrompt && busyThread(await readThread())) {
+    throw new Error('T3 Code is already running this conversation. Wait for it to finish before changing its model or effort.')
+  }
   const sameInstance = picked.instanceId === (thread?.providerInstanceId ?? current.instanceId)
-  if (!unresolvedSend && ((!running && !activePrompt && !busyThread(await readThread())) || sameInstance)) {
+  if ((!running && !activePrompt) || sameInstance) {
     try {
       await client.call('t3_thread_configure', { threadId: thread!.threadId, modelSelection })
       pendingSelection = undefined

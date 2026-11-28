@@ -1246,3 +1246,32 @@ test('T3 surfaces provider error item details when a run fails', async () => {
   assert.match(String(result.result), /Upstream Carbon rate limit hit/)
   await H.stop(l.id)
 })
+
+test('T3 allows switching models mid-turn while work is actively streaming', async () => {
+  const l = launch()
+  await turn(l, 'quick')
+  const native = events.find((e) => e.id === l.id && e.ev === 'claude.native')!.nativeId as string
+  const pause = delayNext('t3_thread_read', native)
+  const index = events.length
+  const firstChunk = eventAfter(index, (e) => e.id === l.id && (e.msg as { type?: string } | undefined)?.type === 'stream_event')
+  const done = eventAfter(index, isResult(l.id))
+  await H.send(l, [{ type: 'text', text: 'stream' }], randomUUID())
+  // Baseline read pause -> release so run starts and streams first chunk
+  await pause.entered
+  pause.release()
+  await firstChunk
+  const midPause = delayNext('t3_thread_read', native)
+  await midPause.entered
+  try {
+    await H.setSelection(l.id, 'fake/two', 'high')
+    assert.equal(threads.get(native)!.model, 'two')
+    assert.deepEqual(events.filter((e) => e.id === l.id && e.ev === 'claude.efforts').at(-1)?.efforts, ['low', 'high'])
+  } finally {
+    midPause.release()
+  }
+  const res = (await done).msg as Record<string, unknown>
+  assert.equal(res.is_error, false)
+  assert.equal(res.result, 'Hello')
+  assert.equal(threads.get(native)!.model, 'two')
+  await H.stop(l.id)
+})
